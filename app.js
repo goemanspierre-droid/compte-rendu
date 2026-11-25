@@ -2,7 +2,7 @@
 // reconnaissance des intervenants, résumé + actions, export Outlook et agenda
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const VERSION = '1.3.0'; // à augmenter à chaque mise à jour (aussi dans sw.js)
+const VERSION = '1.4.0'; // à augmenter à chaque mise à jour (aussi dans sw.js)
 const CHUNK_MS = 15000; // l'audio est sauvegardé toutes les 15 s (rien n'est perdu en cas de coupure)
 
 // ---------------- Réglages ----------------
@@ -22,6 +22,7 @@ const DEFAULTS = {
   outlook: 'office',
   agenda: 'outlook',
   mailTo: '',
+  ttsRate: '1',
 };
 const S = Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem('settings') || '{}'));
 const saveSettings = () => localStorage.setItem('settings', JSON.stringify(S));
@@ -513,7 +514,65 @@ async function renderList() {
     attachSwipe(el);
   });
 }
-async function openDetail(id) { curId = id; show('detail'); await renderDetail(); }
+// ---------------- Lecture à haute voix (synthèse vocale du téléphone, sans connexion) ----------------
+const TTS = { on: null, wake: null };
+const hasTTS = 'speechSynthesis' in window;
+function frVoice() {
+  const vs = hasTTS ? speechSynthesis.getVoices() : [];
+  return vs.find((v) => /^fr[-_]FR/i.test(v.lang) && /google/i.test(v.name)) || vs.find((v) => /^fr[-_]FR/i.test(v.lang)) || vs.find((v) => /^fr/i.test(v.lang)) || null;
+}
+function stopSpeak() {
+  if (hasTTS) speechSynthesis.cancel();
+  TTS.on = null;
+  if (TTS.wake) { TTS.wake.release().catch(() => {}); TTS.wake = null; }
+  updSpeakBtns();
+}
+function speak(kind, text) {
+  if (!hasTTS) return toast('Lecture vocale non disponible sur cet appareil');
+  if (TTS.on === kind) return stopSpeak();
+  speechSynthesis.cancel();
+  // découpage en phrases : Chrome Android coupe parfois les textes longs
+  const parts = text.replace(/\s+/g, ' ').match(/[^.!?;]+[.!?;]*/g) || [text];
+  const chunks = []; let cur = '';
+  for (const p of parts) { if ((cur + p).length > 220 && cur) { chunks.push(cur); cur = p; } else cur += p; }
+  if (cur.trim()) chunks.push(cur);
+  TTS.on = kind; updSpeakBtns();
+  try { navigator.wakeLock.request('screen').then((w) => { if (TTS.on) TTS.wake = w; else w.release(); }).catch(() => {}); } catch (e) {}
+  const v = frVoice();
+  chunks.forEach((c, i) => {
+    const u = new SpeechSynthesisUtterance(c.trim());
+    u.lang = 'fr-FR'; try { if (v) u.voice = v; } catch (e) {} u.rate = +S.ttsRate || 1;
+    if (i === chunks.length - 1) u.onend = () => { if (TTS.on === kind) stopSpeak(); };
+    u.onerror = (e) => { if (e.error !== 'interrupted' && e.error !== 'canceled' && TTS.on === kind) stopSpeak(); };
+    speechSynthesis.speak(u);
+  });
+}
+function updSpeakBtns() {
+  document.querySelectorAll('[data-speak]').forEach((b) => {
+    const k = b.dataset.speak, on = TTS.on === k;
+    b.textContent = on ? '⏹ Arrêter la lecture' : k === 'sum' ? '🔊 Écouter le résumé' : '🔊 Écouter les actions';
+    b.classList.toggle('pri', on);
+  });
+}
+if (hasTTS) { speechSynthesis.getVoices(); speechSynthesis.addEventListener && speechSynthesis.addEventListener('voiceschanged', () => {}); }
+const dLong = (iso) => new Date(iso + 'T12:00:00').toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long' });
+function summarySpeech(r) {
+  const s = r.summary, nm = namer(r);
+  const end = (x) => { x = nm(x).trim(); return /[.!?]$/.test(x) ? x : x + '.'; };
+  let t = `Compte-rendu : ${r.title}. ${nm(s.resume)} `;
+  if (s.points_cles && s.points_cles.length) t += 'Points clés : ' + s.points_cles.map(end).join(' ') + ' ';
+  if (s.decisions && s.decisions.length) t += 'Décisions : ' + s.decisions.map(end).join(' ') + ' ';
+  const p = s.prochaine_reunion;
+  if (p) t += `Prochaine réunion le ${dLong(p.date)}${p.heure ? ' à ' + p.heure.replace(/^0?(\d+):00$/, '$1 heures').replace(/^0?(\d+):(\d+)$/, '$1 heures $2') : ''}. `;
+  return t;
+}
+function actionsSpeech(r) {
+  const nm = namer(r), open = r.summary.actions.filter((a) => !a.fait);
+  if (!open.length) return 'Aucune action en attente.';
+  return `${open.length} action${open.length > 1 ? 's' : ''} à réaliser. ` + open.map((a, i) =>
+    `Action ${i + 1} : ${nm(a.action).replace(/\.$/, '')}.${a.responsable ? ' Responsable : ' + nm(a.responsable) + '.' : ''}${a.echeance_date ? ' Pour le ' + dLong(a.echeance_date) + '.' : a.echeance ? ' Échéance : ' + a.echeance + '.' : ''}${a.priorite === 'haute' ? ' Prioritaire.' : ''}`).join(' ');
+}
+async function openDetail(id) { if (id !== curId) stopSpeak(); curId = id; show('detail'); await renderDetail(); }
 async function renderDetail() {
   const r = await getRec(curId);
   if (!r) { show('home'); return; }
@@ -549,11 +608,11 @@ async function renderDetail() {
   ${r.transcript && !hasSpeakers(r) && S.diarize && cloudKey() && n !== 'offline' && r.status !== 'run' ? `<div class="card"><div class="muted">Transcription faite sans distinguer les intervenants.</div>
     <button id="dDiar" style="margin-top:8px">👥 Identifier les intervenants (envoi audio ${sizeMB} Mo${n === 'mobile' ? ', en 4G' : ''})</button></div>` : ''}
   ${s ? `<div class="card">
-    <h2>Résumé</h2><div>${esc(nm(s.resume))}</div>
+    <h2>Résumé</h2>${hasTTS ? '<button data-speak="sum" class="speak">🔊 Écouter le résumé</button>' : ''}<div>${esc(nm(s.resume))}</div>
     ${s.points_cles && s.points_cles.length ? `<h3>Points clés</h3><ul>${s.points_cles.map((x) => `<li>${esc(nm(x))}</li>`).join('')}</ul>` : ''}
     ${s.decisions && s.decisions.length ? `<h3>Décisions</h3><ul>${s.decisions.map((x) => `<li>${esc(nm(x))}</li>`).join('')}</ul>` : ''}
   </div>
-  <div class="card"><h2>Actions à réaliser</h2>
+  <div class="card"><h2>Actions à réaliser</h2>${hasTTS && (s.actions || []).length ? '<button data-speak="act" class="speak">🔊 Écouter les actions</button>' : ''}
     ${(s.actions || []).length ? s.actions.map((a, i) => `<div class="act ${a.fait ? 'done' : ''}"><input type="checkbox" data-i="${i}" ${a.fait ? 'checked' : ''}>
       <div style="flex:1"><div class="t">${esc(nm(a.action))}</div>
       <div class="m">${a.responsable ? '👤 ' + esc(nm(a.responsable)) + ' · ' : ''}${a.echeance ? '« ' + esc(a.echeance) + ' » · ' : ''}<span class="prio-${esc(a.priorite)}">${esc(a.priorite || '')}</span></div>
@@ -608,6 +667,8 @@ async function renderDetail() {
     au.removeEventListener('loadedmetadata', fix);
     if (au.duration === Infinity) { au.currentTime = 1e101; au.addEventListener('timeupdate', function back() { au.removeEventListener('timeupdate', back); au.currentTime = 0; }); }
   }));
+  all('[data-speak]').forEach((b) => (b.onclick = async () => { const rr = await getRec(curId); speak(b.dataset.speak, b.dataset.speak === 'sum' ? summarySpeech(rr) : actionsSpeech(rr)); }));
+  updSpeakBtns();
   all('.spkPlay').forEach((b) => (b.onclick = () => { const au = $('#dAudio'); if (!au) return; au.currentTime = Math.max(0, +b.dataset.t - 0.3); au.play(); }));
 }
 const SPK_COLORS = ['#166534', '#1d4ed8', '#b45309', '#7c3aed', '#be123c', '#0f766e', '#4d7c0f', '#9a3412'];
@@ -629,7 +690,7 @@ function toast(t, btn, onBtn, ms = 2600) {
 }
 
 // ---------------- Réglages ----------------
-const FIELDS = { policy: 's_policy', anthropicKey: 's_anthropicKey', claudeModel: 's_claudeModel', context: 's_context', stt: 's_stt', mistralKey: 's_mistralKey', openaiKey: 's_openaiKey', localModel: 's_localModel', outlook: 's_outlook', agenda: 's_agenda', mailTo: 's_mailTo' };
+const FIELDS = { policy: 's_policy', anthropicKey: 's_anthropicKey', claudeModel: 's_claudeModel', context: 's_context', stt: 's_stt', mistralKey: 's_mistralKey', openaiKey: 's_openaiKey', localModel: 's_localModel', outlook: 's_outlook', agenda: 's_agenda', mailTo: 's_mailTo', ttsRate: 's_ttsRate' };
 const CHECKS = { summaryMobile: 's_summaryMobile', unknownWifi: 's_unknownWifi', diarize: 's_diarize', autoDiarize: 's_autoDiarize' };
 function fillSettings() {
   for (const [k, id] of Object.entries(FIELDS)) $('#' + id).value = S[k];
@@ -653,7 +714,7 @@ $('#dlModel').onclick = async () => {
 
 $('#recBtn').onclick = () => (R.id ? stopRecording() : startRecording());
 $('#setBtn').onclick = () => { fillSettings(); show('settings'); };
-$('#backBtn').onclick = () => { show('home'); renderList(); };
+$('#backBtn').onclick = () => { stopSpeak(); show('home'); renderList(); };
 window.addEventListener('beforeunload', (e) => { if (R.id) { e.preventDefault(); e.returnValue = ''; } });
 
 // ---------------- Démarrage ----------------
@@ -671,3 +732,4 @@ window.addEventListener('beforeunload', (e) => { if (R.id) { e.preventDefault();
   if (!S.anthropicKey) toast('Commencez par renseigner vos clés API dans ⚙ Réglages');
   resumeQueue();
 })();
+$('#ttsTest').onclick = () => { S.ttsRate = $('#s_ttsRate').value; speak('test', 'Bonjour. Voici la lecture à haute voix du compte-rendu de réunion. Action 1 : envoyer l\'offre au client, pour le vendredi 27 novembre.'); };
