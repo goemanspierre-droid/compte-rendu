@@ -177,11 +177,12 @@ audio{width:100%;margin-top:6px}
       <h2>Lecture à haute voix</h2>
       <label for="s_ttsEngine">Voix utilisée</label>
       <select id="s_ttsEngine">
-        <option value="auto">Voix du téléphone, sinon voix en ligne Mistral</option>
-        <option value="phone">Toujours la voix du téléphone (hors ligne, gratuit)</option>
-        <option value="cloud">Toujours la voix en ligne Mistral (≈ 2 à 3 centimes par lecture)</option>
+        <option value="app">Voix intégrée à l'appli (gratuite, hors ligne)</option>
+        <option value="auto">Voix du téléphone, sinon voix intégrée</option>
+        <option value="phone">Toujours la voix du téléphone</option>
+        <option value="cloud">Voix en ligne Mistral (≈ 2 à 3 centimes par lecture)</option>
       </select>
-      <div class="hint">La voix en ligne utilise votre clé Mistral et nécessite du réseau ; une lecture déjà faite est rejouée sans coût.</div>
+      <div class="hint">Voix intégrée : fabriquée par l'appli sur le téléphone, ne dépend pas du moteur Samsung/Google. Téléchargement unique d'environ 115 Mo (en wifi), puis gratuite et sans réseau. La préparation prend quelques secondes à une minute selon la longueur ; l'audio est ensuite gardé pour être réécouté immédiatement.</div>
       <label for="s_ttsRate">Vitesse de lecture</label>
       <select id="s_ttsRate">
         <option value="0.85">Lente</option>
