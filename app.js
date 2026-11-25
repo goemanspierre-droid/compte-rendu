@@ -2,7 +2,7 @@
 // reconnaissance des intervenants, résumé + actions, export Outlook et agenda
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const VERSION = '1.4.0'; // à augmenter à chaque mise à jour (aussi dans sw.js)
+const VERSION = '1.4.1'; // à augmenter à chaque mise à jour (aussi dans sw.js)
 const CHUNK_MS = 15000; // l'audio est sauvegardé toutes les 15 s (rien n'est perdu en cas de coupure)
 
 // ---------------- Réglages ----------------
@@ -515,37 +515,50 @@ async function renderList() {
   });
 }
 // ---------------- Lecture à haute voix (synthèse vocale du téléphone, sans connexion) ----------------
-const TTS = { on: null, wake: null };
+const TTS = { on: null, wake: null, queue: [], started: false, watch: null };
 const hasTTS = 'speechSynthesis' in window;
 function frVoice() {
   const vs = hasTTS ? speechSynthesis.getVoices() : [];
   return vs.find((v) => /^fr[-_]FR/i.test(v.lang) && /google/i.test(v.name)) || vs.find((v) => /^fr[-_]FR/i.test(v.lang)) || vs.find((v) => /^fr/i.test(v.lang)) || null;
 }
 function stopSpeak() {
-  if (hasTTS) speechSynthesis.cancel();
+  TTS.queue = [];
+  if (hasTTS && (speechSynthesis.speaking || speechSynthesis.pending)) speechSynthesis.cancel();
   TTS.on = null;
+  clearTimeout(TTS.watch);
   if (TTS.wake) { TTS.wake.release().catch(() => {}); TTS.wake = null; }
   updSpeakBtns();
+}
+// Lecture phrase par phrase (plus fiable sur Chrome Android que de tout empiler d'un coup)
+function speakNext(kind) {
+  if (TTS.on !== kind) return;
+  const c = TTS.queue.shift();
+  if (!c) return stopSpeak();
+  const u = new SpeechSynthesisUtterance(c);
+  u.lang = 'fr-FR'; u.rate = +S.ttsRate || 1; u.volume = 1;
+  const v = frVoice(); if (v) { try { u.voice = v; } catch (e) {} }
+  u.onstart = () => { TTS.started = true; clearTimeout(TTS.watch); };
+  u.onend = () => speakNext(kind);
+  u.onerror = (e) => { if (TTS.on !== kind) return; if (e.error === 'interrupted' || e.error === 'canceled') return; toast('Lecture impossible : ' + e.error); stopSpeak(); };
+  speechSynthesis.resume();
+  speechSynthesis.speak(u);
 }
 function speak(kind, text) {
   if (!hasTTS) return toast('Lecture vocale non disponible sur cet appareil');
   if (TTS.on === kind) return stopSpeak();
-  speechSynthesis.cancel();
-  // découpage en phrases : Chrome Android coupe parfois les textes longs
+  const wasBusy = speechSynthesis.speaking || speechSynthesis.pending;
+  if (wasBusy) speechSynthesis.cancel();
   const parts = text.replace(/\s+/g, ' ').match(/[^.!?;]+[.!?;]*/g) || [text];
   const chunks = []; let cur = '';
-  for (const p of parts) { if ((cur + p).length > 220 && cur) { chunks.push(cur); cur = p; } else cur += p; }
-  if (cur.trim()) chunks.push(cur);
-  TTS.on = kind; updSpeakBtns();
+  for (const p of parts) { if ((cur + p).length > 200 && cur) { chunks.push(cur.trim()); cur = p; } else cur += p; }
+  if (cur.trim()) chunks.push(cur.trim());
+  TTS.queue = chunks; TTS.on = kind; TTS.started = false; updSpeakBtns();
   try { navigator.wakeLock.request('screen').then((w) => { if (TTS.on) TTS.wake = w; else w.release(); }).catch(() => {}); } catch (e) {}
-  const v = frVoice();
-  chunks.forEach((c, i) => {
-    const u = new SpeechSynthesisUtterance(c.trim());
-    u.lang = 'fr-FR'; try { if (v) u.voice = v; } catch (e) {} u.rate = +S.ttsRate || 1;
-    if (i === chunks.length - 1) u.onend = () => { if (TTS.on === kind) stopSpeak(); };
-    u.onerror = (e) => { if (e.error !== 'interrupted' && e.error !== 'canceled' && TTS.on === kind) stopSpeak(); };
-    speechSynthesis.speak(u);
-  });
+  // si rien ne démarre en 4 s : on prévient (volume média, moteur vocal)
+  clearTimeout(TTS.watch);
+  TTS.watch = setTimeout(() => { if (TTS.on === kind && !TTS.started) { toast('Aucun son ? Montez le volume MÉDIA pendant la lecture, et vérifiez le moteur de synthèse vocale (⚙ Réglages)', null, null, 7000); stopSpeak(); } }, 4000);
+  if (wasBusy) setTimeout(() => speakNext(kind), 250); // Chrome Android ignore un speak() juste après cancel()
+  else speakNext(kind);
 }
 function updSpeakBtns() {
   document.querySelectorAll('[data-speak]').forEach((b) => {
@@ -667,7 +680,7 @@ async function renderDetail() {
     au.removeEventListener('loadedmetadata', fix);
     if (au.duration === Infinity) { au.currentTime = 1e101; au.addEventListener('timeupdate', function back() { au.removeEventListener('timeupdate', back); au.currentTime = 0; }); }
   }));
-  all('[data-speak]').forEach((b) => (b.onclick = async () => { const rr = await getRec(curId); speak(b.dataset.speak, b.dataset.speak === 'sum' ? summarySpeech(rr) : actionsSpeech(rr)); }));
+  all('[data-speak]').forEach((b) => (b.onclick = () => speak(b.dataset.speak, b.dataset.speak === 'sum' ? summarySpeech(r) : actionsSpeech(r))));
   updSpeakBtns();
   all('.spkPlay').forEach((b) => (b.onclick = () => { const au = $('#dAudio'); if (!au) return; au.currentTime = Math.max(0, +b.dataset.t - 0.3); au.play(); }));
 }
@@ -732,4 +745,4 @@ window.addEventListener('beforeunload', (e) => { if (R.id) { e.preventDefault();
   if (!S.anthropicKey) toast('Commencez par renseigner vos clés API dans ⚙ Réglages');
   resumeQueue();
 })();
-$('#ttsTest').onclick = () => { S.ttsRate = $('#s_ttsRate').value; speak('test', 'Bonjour. Voici la lecture à haute voix du compte-rendu de réunion. Action 1 : envoyer l\'offre au client, pour le vendredi 27 novembre.'); };
+$('#ttsTest').onclick = () => { S.ttsRate = $('#s_ttsRate').value; const n = hasTTS ? speechSynthesis.getVoices().filter((v) => /^fr/i.test(v.lang)).length : 0; $('#ttsInfo').textContent = hasTTS ? (n ? n + ' voix française(s) trouvée(s) sur le téléphone.' : 'Aucune voix française listée : la voix par défaut du téléphone sera utilisée.') : 'Synthèse vocale non disponible dans ce navigateur.'; speak('test', 'Bonjour. Voici la lecture à haute voix du compte-rendu de réunion. Action 1 : envoyer l\'offre au client, pour le vendredi 27 novembre.'); };
