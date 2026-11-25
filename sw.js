@@ -1,6 +1,6 @@
 // Service worker : l'application fonctionne sans réseau une fois installée
-const CACHE = 'cr-1.5.1';
-const SHELL = ['./', 'index.html', 'app.js', 'whisper-worker.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
+const CACHE = 'cr-1.6.0';
+const SHELL = ['./', 'index.html', 'app.js', 'whisper-worker.js', 'tts-worker.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 self.addEventListener('install', (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL))); self.skipWaiting(); });
 self.addEventListener('activate', (e) => {
   e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k.startsWith('cr-') && k !== CACHE).map((k) => caches.delete(k)))));
