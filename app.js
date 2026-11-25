@@ -2,7 +2,7 @@
 // reconnaissance des intervenants, résumé + actions, export Outlook et agenda
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const VERSION = '1.5.1'; // à augmenter à chaque mise à jour (aussi dans sw.js)
+const VERSION = '1.6.0'; // à augmenter à chaque mise à jour (aussi dans sw.js)
 const CHUNK_MS = 15000; // l'audio est sauvegardé toutes les 15 s (rien n'est perdu en cas de coupure)
 
 // ---------------- Réglages ----------------
@@ -527,15 +527,23 @@ function stopSpeak() {
   TTS.queue = [];
   if (hasTTS && (speechSynthesis.speaking || speechSynthesis.pending)) speechSynthesis.cancel();
   if (TTS.audio) { try { TTS.audio.pause(); } catch (e) {} }
-  TTS.on = null; TTS.loading = false;
+  if (TTS.loading && TTS.mode === 'app') cancelTts();
+  TTS.on = null; TTS.loading = false; TTS.mode = null;
   clearTimeout(TTS.watch);
   if (TTS.wake) { TTS.wake.release().catch(() => {}); TTS.wake = null; }
   updSpeakBtns();
 }
 // Le moteur vocal du téléphone ne marche pas : on passe à la voix en ligne (Mistral) si possible
 function phoneFailed(kind, msg) {
-  if (S.ttsEngine !== 'phone' && canCloudTTS()) { localStorage.setItem('ttsPhoneBroken', '1'); const t = TTS.text; stopSpeak(); speakCloud(kind, t); return; }
+  if (S.ttsEngine !== 'phone') { localStorage.setItem('ttsPhoneBroken', '1'); const t = TTS.text; stopSpeak(); speakApp(kind, t); return; }
   toast(msg, null, null, 7000); stopSpeak();
+}
+// Choix de la voix : téléphone, voix intégrée à l'appli, ou voix en ligne Mistral
+function ttsEngineFor() {
+  if (S.ttsEngine === 'cloud') return 'cloud';
+  if (S.ttsEngine === 'app' || !hasTTS) return 'app';
+  if (S.ttsEngine === 'phone') return 'phone';
+  return localStorage.getItem('ttsPhoneBroken') === '1' ? 'app' : 'phone';
 }
 // Lecture phrase par phrase (plus fiable sur Chrome Android que de tout empiler d'un coup)
 function speakNext(kind) {
@@ -563,8 +571,9 @@ function speak(kind, text) {
   if (TTS.on === kind) return stopSpeak();
   if (TTS.on) stopSpeak();
   TTS.text = text;
-  const useCloud = S.ttsEngine === 'cloud' || !hasTTS || (S.ttsEngine !== 'phone' && localStorage.getItem('ttsPhoneBroken') === '1' && canCloudTTS());
-  if (useCloud) return speakCloud(kind, text);
+  const eng = ttsEngineFor();
+  if (eng === 'cloud') return speakCloud(kind, text);
+  if (eng === 'app') return speakApp(kind, text);
   const wasBusy = speechSynthesis.speaking || speechSynthesis.pending;
   if (wasBusy) speechSynthesis.cancel();
   const parts = text.replace(/\s+/g, ' ').match(/[^.!?;]+[.!?;]*/g) || [text];
@@ -588,7 +597,7 @@ async function speakCloud(kind, text) {
   if (!S.mistralKey) { toast('Voix en ligne : clé Mistral manquante (⚙ Réglages)'); return stopSpeak(); }
   if (!navigator.onLine) { toast('Voix en ligne : pas de réseau'); return stopSpeak(); }
   clearTimeout(TTS.watch);
-  TTS.on = kind; TTS.loading = true; TTS.text = text; updSpeakBtns();
+  TTS.on = kind; TTS.loading = true; TTS.mode = 'cloud'; TTS.pct = null; TTS.text = text; updSpeakBtns();
   try { navigator.wakeLock.request('screen').then((w) => { if (TTS.on) TTS.wake = w; else w.release(); }).catch(() => {}); } catch (e) {}
   try {
     let url = TTS.cache.get(text);
@@ -616,10 +625,129 @@ async function speakCloud(kind, text) {
     if (TTS.on === kind) { toast('Voix en ligne : ' + e.message, null, null, 7000); stopSpeak(); }
   }
 }
+// ---------- Voix intégrée (synthèse sur le téléphone, indépendante du moteur Samsung/Google) ----------
+let ttsW = null, ttsSeq = 0, ttsChain = Promise.resolve();
+const ttsCb = new Map();
+function getTtsWorker() {
+  if (ttsW) return ttsW;
+  ttsW = new Worker('tts-worker.js', { type: 'module' });
+  ttsW.onmessage = (e) => { const cb = ttsCb.get(e.data.id); cb && cb(e.data); };
+  ttsW.onerror = (e) => { for (const cb of ttsCb.values()) cb({ type: 'error', error: e.message || 'erreur de la voix intégrée' }); };
+  return ttsW;
+}
+function ttsCall(msg, onProg) {
+  const run = () => new Promise((res, rej) => {
+    const id = ++ttsSeq;
+    ttsCb.set(id, (d) => { if (d.type === 'progress') onProg && onProg(d); else { ttsCb.delete(id); d.type === 'error' ? rej(new Error(d.error)) : res(d); } });
+    getTtsWorker().postMessage({ id, ...msg });
+  });
+  const p = ttsChain.then(run); ttsChain = p.catch(() => {}); return p;
+}
+function cancelTts() {
+  if (!ttsW) return;
+  ttsW.terminate(); ttsW = null;
+  for (const cb of ttsCb.values()) cb({ type: 'error', error: 'annulé' });
+  ttsCb.clear();
+}
+function numFr(n) {
+  const u = ['zéro', 'un', 'deux', 'trois', 'quatre', 'cinq', 'six', 'sept', 'huit', 'neuf', 'dix', 'onze', 'douze', 'treize', 'quatorze', 'quinze', 'seize'];
+  if (n < 17) return u[n];
+  if (n < 20) return 'dix-' + u[n - 10];
+  if (n < 70) { const d = ['', '', 'vingt', 'trente', 'quarante', 'cinquante', 'soixante'][Math.floor(n / 10)], r = n % 10; return r === 0 ? d : r === 1 ? d + ' et un' : d + '-' + u[r]; }
+  if (n < 80) return n === 71 ? 'soixante et onze' : 'soixante-' + numFr(n - 60);
+  if (n < 100) return n === 80 ? 'quatre-vingts' : 'quatre-vingt-' + numFr(n - 80);
+  if (n < 1000) { const c = Math.floor(n / 100), r = n % 100, cs = c === 1 ? 'cent' : u[c] + ' cent' + (r ? '' : 's'); return r ? cs + ' ' + numFr(r) : cs; }
+  if (n < 1e6) { const m = Math.floor(n / 1000), r = n % 1000, ms = m === 1 ? 'mille' : numFr(m) + ' mille'; return r ? ms + ' ' + numFr(r) : ms; }
+  return String(n).split('').map((d) => u[+d]).join(' ');
+}
+// Prépare le texte pour la voix : chiffres en lettres, minuscules, découpage en phrases avec pauses
+function frItems(text) {
+  let t = ' ' + text + ' ';
+  t = t.replace(/\bM\.\s/g, 'Monsieur ').replace(/\bMM\.\s/g, 'Messieurs ').replace(/\bMme\b/g, 'Madame').replace(/\bn°\s?/gi, 'numéro ')
+    .replace(/%/g, ' pour cent').replace(/€/g, ' euros').replace(/&/g, ' et ').replace(/\+/g, ' plus ').replace(/\b1er\b/g, 'premier').replace(/\b1re\b/g, 'première');
+  t = t.replace(/(\d+)\s*h\s*(\d{2})\b/g, (m, h, mi) => h + ' heures ' + (+mi ? mi : ''));
+  t = t.replace(/(\d+),(\d+)/g, '$1 virgule $2');
+  t = t.replace(/\d+/g, (d) => (d.length > 6 ? d.split('').map((x) => numFr(+x)).join(' ') : numFr(+d)));
+  t = t.toLowerCase().replace(/w/g, 'v').replace(/[’`]/g, "'").replace(/æ/g, 'ae');
+  const clean = (x) => x.replace(/[^ '\-a-zàâçèéêëîïôùûüœ]/g, ' ').replace(/\s+/g, ' ').trim();
+  const items = [];
+  for (const sent of t.split(/[.!?;:\n]+/)) {
+    const bits = sent.split(',').map(clean).filter((x) => x.length > 1);
+    bits.forEach((b, i) => {
+      const last = i === bits.length - 1;
+      if (b.length <= 220) { items.push({ s: b, pause: last ? 0.45 : 0.15 }); return; }
+      let cur = '';
+      for (const w of b.split(' ')) { if ((cur + ' ' + w).length > 200) { items.push({ s: cur.trim(), pause: 0.1 }); cur = w; } else cur += ' ' + w; }
+      if (cur.trim()) items.push({ s: cur.trim(), pause: last ? 0.45 : 0.15 });
+    });
+  }
+  return items;
+}
+function wavBlob(pcm, sr) {
+  const b = new ArrayBuffer(44 + pcm.length * 2), v = new DataView(b);
+  const w = (p, s) => { for (let i = 0; i < s.length; i++) v.setUint8(p + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); v.setUint32(4, 36 + pcm.length * 2, true); w(8, 'WAVEfmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, sr, true); v.setUint32(28, sr * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); w(36, 'data'); v.setUint32(40, pcm.length * 2, true);
+  for (let i = 0; i < pcm.length; i++) v.setInt16(44 + i * 2, Math.max(-1, Math.min(1, pcm[i])) * 32767, true);
+  return new Blob([b], { type: 'audio/wav' });
+}
+// Fabrique (ou reprend en mémoire) l'audio d'un texte pour un enregistrement ; conservé pour réécoute hors ligne
+async function appAudio(recId, kind, text, onProg) {
+  const r = await getRec(recId), c = r && r.tts && r.tts[kind];
+  if (c && c.text === text && c.blob) return c.blob;
+  if (localStorage.getItem('ttsModelReady') !== '1' && netMode() !== 'wifi' &&
+    !confirm("Première utilisation de la voix intégrée : téléchargement unique d'environ 115 Mo. Le faire maintenant sans wifi ?")) throw new Error('à faire en wifi la première fois');
+  const res = await ttsCall({ type: 'synth', items: frItems(text) }, (d) => onProg && onProg(d.stage === 'load' ? -Math.max(0.01, d.p) : d.p));
+  localStorage.setItem('ttsModelReady', '1');
+  const blob = wavBlob(res.audio, res.sr);
+  const rr = await getRec(recId);
+  if (rr) { rr.tts = rr.tts || {}; rr.tts[kind] = { text, blob }; await putRec(rr); }
+  return blob;
+}
+function playBlob(kind, blob) {
+  const a = TTS.audio || (TTS.audio = new Audio());
+  if (TTS.url) URL.revokeObjectURL(TTS.url);
+  TTS.url = URL.createObjectURL(blob);
+  a.src = TTS.url; a.playbackRate = +S.ttsRate || 1;
+  a.onended = () => { if (TTS.on === kind) stopSpeak(); };
+  a.play().catch((e) => { toast('Lecture audio impossible : ' + e.message); stopSpeak(); });
+}
+async function speakApp(kind, text) {
+  clearTimeout(TTS.watch);
+  const recId = curId;
+  TTS.on = kind; TTS.loading = true; TTS.mode = 'app'; TTS.pct = 0; TTS.text = text; updSpeakBtns();
+  try { navigator.wakeLock.request('screen').then((w) => { if (TTS.on) TTS.wake = w; else w.release(); }).catch(() => {}); } catch (e) {}
+  try {
+    const blob = kind === 'test' ? wavBlob(...(await ttsCall({ type: 'synth', items: frItems(text) }, (d) => { TTS.pct = d.stage === 'load' ? -Math.max(0.01, d.p) : d.p; updSpeakBtns(); }).then((r) => [r.audio, r.sr])))
+      : await appAudio(recId, kind, text, (p) => { TTS.pct = p; updSpeakBtns(); });
+    if (kind === 'test') localStorage.setItem('ttsModelReady', '1');
+    if (TTS.on !== kind) return;
+    TTS.loading = false; updSpeakBtns();
+    playBlob(kind, blob);
+  } catch (e) {
+    if (TTS.on === kind) { toast('Voix intégrée : ' + e.message, null, null, 7000); TTS.loading = false; stopSpeak(); }
+  }
+}
+// Télécharge la synthèse (résumé + actions à faire) en fichier audio, lisible avec n'importe quel lecteur
+async function downloadSynth(r, btn) {
+  if (btn.dataset.busy) return;
+  btn.dataset.busy = '1'; const lab = btn.textContent;
+  try {
+    const blob = await appAudio(r.id, 'all', summarySpeech(r) + ' ' + actionsSpeech(r), (p) => {
+      btn.textContent = p < 0 ? `⏳ Téléchargement de la voix… ${Math.round(-p * 100)} %` : `⏳ Préparation de l'audio… ${Math.round(p * 100)} %`;
+    });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'Synthese - ' + r.title.replace(/[^\w\- àâäéèêëïîôöùûüç]/gi, '_').slice(0, 60) + '.wav';
+    document.body.appendChild(a); a.click(); setTimeout(() => a.remove(), 1000);
+    toast('Fichier audio téléchargé (dossier Téléchargements)');
+  } catch (e) { toast('Audio : ' + e.message, null, null, 6000); }
+  delete btn.dataset.busy; btn.textContent = lab;
+}
 function updSpeakBtns() {
   document.querySelectorAll('[data-speak]').forEach((b) => {
     const k = b.dataset.speak, on = TTS.on === k;
-    b.textContent = on ? (TTS.loading ? '⏳ Préparation de la voix…' : '⏹ Arrêter la lecture') : k === 'sum' ? '🔊 Écouter le résumé' : '🔊 Écouter les actions';
+    b.textContent = on ? (TTS.loading ? (TTS.pct == null ? '⏳ Préparation de la voix…' : TTS.pct < 0 ? `⏳ Téléchargement de la voix… ${Math.round(-TTS.pct * 100)} %` : `⏳ Préparation de la voix… ${Math.round(TTS.pct * 100)} % (appuyer pour annuler)`) : '⏹ Arrêter la lecture') : k === 'sum' ? '🔊 Écouter le résumé' : '🔊 Écouter les actions';
     b.classList.toggle('pri', on);
   });
 }
@@ -677,11 +805,11 @@ async function renderDetail() {
   ${r.transcript && !hasSpeakers(r) && S.diarize && cloudKey() && n !== 'offline' && r.status !== 'run' ? `<div class="card"><div class="muted">Transcription faite sans distinguer les intervenants.</div>
     <button id="dDiar" style="margin-top:8px">👥 Identifier les intervenants (envoi audio ${sizeMB} Mo${n === 'mobile' ? ', en 4G' : ''})</button></div>` : ''}
   ${s ? `<div class="card">
-    <h2>Résumé</h2>${hasTTS || S.mistralKey ? '<button data-speak="sum" class="speak">🔊 Écouter le résumé</button>' : ''}<div>${esc(nm(s.resume))}</div>
+    <h2>Résumé</h2>${true ? '<button data-speak="sum" class="speak">🔊 Écouter le résumé</button>' : ''}<div>${esc(nm(s.resume))}</div>
     ${s.points_cles && s.points_cles.length ? `<h3>Points clés</h3><ul>${s.points_cles.map((x) => `<li>${esc(nm(x))}</li>`).join('')}</ul>` : ''}
     ${s.decisions && s.decisions.length ? `<h3>Décisions</h3><ul>${s.decisions.map((x) => `<li>${esc(nm(x))}</li>`).join('')}</ul>` : ''}
   </div>
-  <div class="card"><h2>Actions à réaliser</h2>${(hasTTS || S.mistralKey) && (s.actions || []).length ? '<button data-speak="act" class="speak">🔊 Écouter les actions</button>' : ''}
+  <div class="card"><h2>Actions à réaliser</h2>${(s.actions || []).length ? '<button data-speak="act" class="speak">🔊 Écouter les actions</button>' : ''}
     ${(s.actions || []).length ? s.actions.map((a, i) => `<div class="act ${a.fait ? 'done' : ''}"><input type="checkbox" data-i="${i}" ${a.fait ? 'checked' : ''}>
       <div style="flex:1"><div class="t">${esc(nm(a.action))}</div>
       <div class="m">${a.responsable ? '👤 ' + esc(nm(a.responsable)) + ' · ' : ''}${a.echeance ? '« ' + esc(a.echeance) + ' » · ' : ''}<span class="prio-${esc(a.priorite)}">${esc(a.priorite || '')}</span></div>
@@ -694,6 +822,7 @@ async function renderDetail() {
   ${s.questions_ouvertes && s.questions_ouvertes.length ? `<div class="card"><h2>Questions ouvertes</h2><ul>${s.questions_ouvertes.map((x) => `<li>${esc(nm(x))}</li>`).join('')}</ul></div>` : ''}
   <div class="card"><h2>Envoyer</h2><div class="row">
     <button class="pri" id="dOutlook">✉ Outlook</button><button id="dShare">Autre appli</button><button id="dCopy">Copier</button><button id="dDl">.md</button>
+  </div><div class="row" style="margin-top:8px"><button id="dAudioDl">⬇ Audio de la synthèse (.wav)</button>
   </div></div>
   <div class="card"><label for="dExtra" style="margin-top:0">Refaire le résumé avec une consigne</label>
     <textarea id="dExtra" placeholder="ex. : insister sur le planning, séparer les actions client / bureau d'études…"></textarea>
@@ -719,6 +848,7 @@ async function renderDetail() {
   on('#dOutlook', () => sendOutlook(r));
   on('#dShare', async () => { const t = exportText(r, false); if (navigator.share) { try { await navigator.share({ title: 'Compte-rendu – ' + r.title, text: t }); } catch (_) {} } else { await navigator.clipboard.writeText(t); toast('Copié'); } });
   on('#dCopy', async () => { await navigator.clipboard.writeText(exportText(r, false)); toast('Compte-rendu copié'); });
+  on('#dAudioDl', (e) => downloadSynth(r, e.currentTarget));
   on('#dDl', () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([exportText(r, true)], { type: 'text/markdown' })); a.download = r.title.replace(/[^\w\- àâäéèêëïîôöùûüç]/gi, '_') + '.md'; a.click(); });
   on('#dIcsAll', () => shareIcs([...dated.map((a) => actionEvent(r, a)), ...(s.prochaine_reunion ? [meetingEvent(r)] : [])], 'Actions – ' + r.title));
   on('#dNext', () => addToCalendar(meetingEvent(r), r));
@@ -797,8 +927,9 @@ window.addEventListener('beforeunload', (e) => { if (R.id) { e.preventDefault();
   }
   $('#verHome').textContent = 'G ENVIRONNEMENT · Compte-rendu · version ' + VERSION;
   $('#verSet').textContent = 'Version ' + VERSION + ' — vos réglages et clés restent sur ce téléphone';
+  if (!localStorage.getItem('mig160')) { localStorage.setItem('mig160', '1'); if (S.ttsEngine === 'cloud' || S.ttsEngine === 'phone') { S.ttsEngine = 'app'; saveSettings(); } }
   updateNet(); renderList();
   if (!S.anthropicKey) toast('Commencez par renseigner vos clés API dans ⚙ Réglages');
   resumeQueue();
 })();
-$('#ttsTest').onclick = () => { localStorage.removeItem('ttsLevel'); localStorage.removeItem('ttsPhoneBroken'); S.ttsRate = $('#s_ttsRate').value; S.ttsEngine = $('#s_ttsEngine').value; const n = hasTTS ? speechSynthesis.getVoices().filter((v) => /^fr/i.test(v.lang)).length : 0; $('#ttsInfo').textContent = hasTTS ? (n ? n + ' voix française(s) trouvée(s) sur le téléphone.' : 'Aucune voix française listée : la voix par défaut du téléphone sera utilisée.') : 'Synthèse vocale non disponible dans ce navigateur.'; speak('test', 'Bonjour. Voici la lecture à haute voix du compte-rendu de réunion. Action 1 : envoyer l\'offre au client, pour le vendredi 27 novembre.'); };
+$('#ttsTest').onclick = () => { localStorage.removeItem('ttsLevel'); if ($('#s_ttsEngine').value !== 'app') localStorage.removeItem('ttsPhoneBroken'); S.ttsRate = $('#s_ttsRate').value; S.ttsEngine = $('#s_ttsEngine').value; const n = hasTTS ? speechSynthesis.getVoices().filter((v) => /^fr/i.test(v.lang)).length : 0; $('#ttsInfo').textContent = hasTTS ? (n ? n + ' voix française(s) trouvée(s) sur le téléphone.' : 'Aucune voix française listée : la voix par défaut du téléphone sera utilisée.') : 'Synthèse vocale non disponible dans ce navigateur.'; speak('test', 'Bonjour. Voici la lecture à haute voix du compte-rendu de réunion. Action 1 : envoyer l\'offre au client, pour le vendredi 27 novembre.'); };
