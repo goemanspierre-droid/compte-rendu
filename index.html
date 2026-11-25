@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14532d">
+<title>Compte-rendu</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<style>
+:root{--g:#14532d;--g2:#166534;--bg:#f4f6f4;--card:#fff;--tx:#1c2321;--mu:#66706b;--bd:#dfe5e1;--red:#b91c1c;--amb:#b45309;--blu:#1d4ed8}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+header{position:sticky;top:0;z-index:5;background:var(--g);color:#fff;padding:12px 14px calc(12px);display:flex;align-items:center;gap:10px}
+header h1{font-size:18px;margin:0;flex:1;font-weight:600}
+.chip{font-size:12px;padding:4px 9px;border-radius:99px;background:rgba(255,255,255,.16);white-space:nowrap}
+.iconbtn{background:none;border:0;color:inherit;font-size:22px;padding:4px 6px;cursor:pointer}
+main{max-width:720px;margin:0 auto;padding:14px 14px 120px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:14px;padding:14px;margin-bottom:12px}
+.muted{color:var(--mu);font-size:14px}
+.row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+button,.btn{font:inherit;border:1px solid var(--bd);background:#fff;color:var(--tx);border-radius:10px;padding:9px 13px;cursor:pointer}
+button.pri{background:var(--g2);color:#fff;border-color:var(--g2)}
+button.dan{color:var(--red);border-color:#f1c4c4}
+button:disabled{opacity:.5}
+.big{display:block;width:100%;padding:16px;font-size:18px;border-radius:14px}
+#recBtn{width:120px;height:120px;border-radius:50%;border:0;background:#dc2626;color:#fff;font-size:15px;font-weight:600;margin:6px auto;display:block;box-shadow:0 6px 18px rgba(220,38,38,.35)}
+#recBtn.on{background:#111;box-shadow:0 0 0 8px rgba(220,38,38,.25)}
+.timer{font-variant-numeric:tabular-nums;font-size:34px;text-align:center;font-weight:600}
+.meter{height:8px;background:#e6ebe8;border-radius:9px;overflow:hidden;margin:8px 0}
+.meter>i{display:block;height:100%;width:0;background:#16a34a;transition:width .1s}
+.list .item{display:block;padding:12px 2px;border-bottom:1px solid var(--bd);cursor:pointer}
+.list .item:last-child{border-bottom:0}
+.item b{display:block}
+.badge{display:inline-block;font-size:12px;padding:2px 8px;border-radius:99px;background:#eef2ef;color:var(--mu);margin-right:4px}
+.badge.ok{background:#dcfce7;color:#166534}.badge.wait{background:#fef3c7;color:var(--amb)}.badge.err{background:#fee2e2;color:var(--red)}.badge.run{background:#dbeafe;color:var(--blu)}
+h2{font-size:17px;margin:0 0 8px}
+h3{font-size:15px;margin:14px 0 6px;color:var(--g)}
+ul{margin:4px 0;padding-left:20px}
+.act{display:flex;gap:10px;align-items:flex-start;padding:8px 0;border-bottom:1px dashed var(--bd)}
+.act:last-child{border-bottom:0}
+.act input{width:20px;height:20px;margin-top:2px;flex:none}
+.act.done .t{text-decoration:line-through;color:var(--mu)}
+.act .m{font-size:13px;color:var(--mu)}
+.prio-haute{color:var(--red);font-weight:600}
+label{display:block;font-size:14px;font-weight:600;margin:12px 0 4px}
+input[type=text],input[type=password],select,textarea{width:100%;font:inherit;padding:9px 10px;border:1px solid var(--bd);border-radius:10px;background:#fff}
+textarea{min-height:80px}
+.hint{font-size:13px;color:var(--mu);margin-top:3px}
+.hidden{display:none!important}
+details summary{cursor:pointer;font-weight:600;color:var(--g)}
+.transcript{white-space:pre-wrap;font-size:14px;max-height:50vh;overflow:auto;background:#fafbfa;border-radius:10px;padding:10px;margin-top:8px}
+.prog{height:6px;background:#e6ebe8;border-radius:9px;overflow:hidden;margin-top:6px}.prog>i{display:block;height:100%;background:var(--blu);width:0}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#111;color:#fff;padding:10px 16px;border-radius:10px;font-size:14px;z-index:20;max-width:90vw}
+audio{width:100%;margin-top:6px}
+.spk{padding:8px 0;border-bottom:1px dashed var(--bd)}.spk:last-child{border-bottom:0}
+.spk .m,.utt .m{font-size:13px;color:var(--mu)}
+.spk .spkName{flex:1}
+.dot{width:12px;height:12px;border-radius:50%;flex:none}
+.utt{margin-bottom:8px}
+.netbox{font-size:14px;border-left:4px solid var(--g2);padding:8px 10px;background:#f0f7f2;border-radius:8px}
+</style>
+</head>
+<body>
+<header>
+  <button class="iconbtn hidden" id="backBtn" aria-label="Retour">←</button>
+  <h1 id="title">Compte-rendu</h1>
+  <span class="chip" id="netChip">…</span>
+  <button class="iconbtn" id="setBtn" aria-label="Réglages">⚙</button>
+</header>
+
+<main>
+  <!-- ACCUEIL -->
+  <section id="vHome">
+    <div class="card" style="text-align:center">
+      <button id="recBtn">● Enregistrer</button>
+      <div id="recPanel" class="hidden">
+        <div class="timer" id="timer">00:00</div>
+        <div class="meter"><i id="lvl"></i></div>
+        <div class="muted">Gardez l'application au premier plan pendant l'enregistrement (l'écran reste allumé).</div>
+      </div>
+      <div class="row" style="justify-content:center;margin-top:8px" id="homeTools">
+        <label class="btn" style="margin:0;font-weight:400">Importer un audio<input type="file" id="importFile" accept="audio/*,video/*" hidden></label>
+      </div>
+    </div>
+    <div class="netbox" id="netExplain"></div>
+    <div class="card list" id="recList" style="margin-top:12px"></div>
+  </section>
+
+  <!-- DETAIL -->
+  <section id="vDetail" class="hidden"></section>
+
+  <!-- REGLAGES -->
+  <section id="vSettings" class="hidden">
+    <div class="card">
+      <h2>Réseau et coûts de connexion</h2>
+      <label for="s_policy">Mode de traitement</label>
+      <select id="s_policy">
+        <option value="auto">Automatique : wifi → cloud, sinon → sur le téléphone</option>
+        <option value="cloud">Toujours cloud</option>
+        <option value="local">Toujours sur le téléphone</option>
+      </select>
+      <label><input type="checkbox" id="s_summaryMobile" style="width:auto"> Autoriser le résumé en données mobiles</label>
+      <div class="hint">Seul le texte est envoyé (quelques dizaines de Ko pour 1 h de réunion). Sinon, le résumé attend le wifi.</div>
+      <label><input type="checkbox" id="s_unknownWifi" style="width:auto"> Considérer une connexion de type inconnu comme du wifi</label>
+      <div class="hint">Certains téléphones n'indiquent pas le type de réseau. Par sécurité, il est traité comme des données mobiles.</div>
+    </div>
+
+    <div class="card">
+      <h2>Résumé et actions (Claude)</h2>
+      <label for="s_anthropicKey">Clé API Anthropic</label>
+      <input type="password" id="s_anthropicKey" placeholder="sk-ant-…" autocomplete="off">
+      <div class="hint">À créer sur console.anthropic.com. Stockée uniquement sur ce téléphone.</div>
+      <label for="s_claudeModel">Modèle</label>
+      <input type="text" id="s_claudeModel">
+      <label for="s_context">Contexte métier (aide à rédiger des résumés pertinents)</label>
+      <textarea id="s_context"></textarea>
+    </div>
+
+    <div class="card">
+      <h2>Transcription cloud (wifi)</h2>
+      <label for="s_stt">Service</label>
+      <select id="s_stt">
+        <option value="mistral">Mistral Voxtral (France / UE)</option>
+        <option value="openai">OpenAI</option>
+      </select>
+      <label><input type="checkbox" id="s_diarize" style="width:auto"> Reconnaître qui parle (intervenants)</label>
+      <label><input type="checkbox" id="s_autoDiarize" style="width:auto"> Ajouter les intervenants au retour du wifi</label>
+      <div class="hint">Pour une réunion transcrite sur le téléphone (hors wifi) : l'audio est renvoyé au cloud dès le wifi retrouvé, puis le résumé est refait. Ne s'applique pas si vous avez déjà coché des actions.</div>
+      <label for="s_mistralKey">Clé API Mistral</label>
+      <input type="password" id="s_mistralKey" placeholder="clé console.mistral.ai" autocomplete="off">
+      <label for="s_openaiKey">Clé API OpenAI (si choisi)</label>
+      <input type="password" id="s_openaiKey" placeholder="sk-…" autocomplete="off">
+    </div>
+
+    <div class="card">
+      <h2>Transcription sur le téléphone (hors wifi)</h2>
+      <label for="s_localModel">Modèle Whisper</label>
+      <select id="s_localModel">
+        <option value="onnx-community/whisper-tiny">Tiny — ~40 Mo, rapide, qualité moyenne</option>
+        <option value="onnx-community/whisper-base">Base — ~80 Mo, bon compromis</option>
+        <option value="onnx-community/whisper-small">Small — ~250 Mo, meilleur mais lent</option>
+      </select>
+      <div class="hint" id="modelState"></div>
+      <button id="dlModel" style="margin-top:8px">Télécharger le modèle maintenant (en wifi)</button>
+      <div class="prog hidden" id="dlProg"><i></i></div>
+    </div>
+
+    <div class="card">
+      <h2>Outlook et agenda</h2>
+      <label for="s_outlook">Compte Outlook</label>
+      <select id="s_outlook">
+        <option value="office">Microsoft 365 (professionnel)</option>
+        <option value="live">Outlook.com / Hotmail (personnel)</option>
+      </select>
+      <label for="s_mailTo">Destinataires par défaut du compte-rendu (facultatif)</label>
+      <input type="text" id="s_mailTo" placeholder="adresse1@…, adresse2@…">
+      <label for="s_agenda">Agenda pour les échéances</label>
+      <select id="s_agenda">
+        <option value="outlook">Agenda Outlook (ouvre l'événement pré-rempli)</option>
+        <option value="google">Google Agenda</option>
+        <option value="ics">Fichier .ics (à ouvrir avec l'appli agenda de votre choix)</option>
+      </select>
+    </div>
+
+    <button class="pri big" id="saveSet">Enregistrer les réglages</button>
+  </section>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>
