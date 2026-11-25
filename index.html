@@ -175,6 +175,13 @@ audio{width:100%;margin-top:6px}
 
     <div class="card">
       <h2>Lecture à haute voix</h2>
+      <label for="s_ttsEngine">Voix utilisée</label>
+      <select id="s_ttsEngine">
+        <option value="auto">Voix du téléphone, sinon voix en ligne Mistral</option>
+        <option value="phone">Toujours la voix du téléphone (hors ligne, gratuit)</option>
+        <option value="cloud">Toujours la voix en ligne Mistral (≈ 2 à 3 centimes par lecture)</option>
+      </select>
+      <div class="hint">La voix en ligne utilise votre clé Mistral et nécessite du réseau ; une lecture déjà faite est rejouée sans coût.</div>
       <label for="s_ttsRate">Vitesse de lecture</label>
       <select id="s_ttsRate">
         <option value="0.85">Lente</option>
