@@ -2,6 +2,7 @@
 // reconnaissance des intervenants, résumé + actions, export Outlook et agenda
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const VERSION = '1.3.0'; // à augmenter à chaque mise à jour (aussi dans sw.js)
 const CHUNK_MS = 15000; // l'audio est sauvegardé toutes les 15 s (rien n'est perdu en cas de coupure)
 
 // ---------------- Réglages ----------------
@@ -90,7 +91,7 @@ function canSummarize(n = netMode()) {
 }
 function updateNet() {
   const n = netMode();
-  $('#netChip').textContent = NET_LABEL[n];
+  $('#netChip').textContent = { wifi: '📶 Wifi', mobile: '📱 4G', offline: '✈ Hors ligne' }[n];
   const tr = transcribeRoute(n);
   const txt = {
     cloud: 'Transcription dans le cloud' + (S.diarize ? ' avec reconnaissance des intervenants.' : '.'),
@@ -466,13 +467,51 @@ function badge(r) {
   const m = { recording: ['run', 'Enregistrement'], recorded: ['wait', 'À traiter'], wait: ['wait', 'En attente'], run: ['run', 'En cours'], done: ['ok', 'Prêt'], error: ['err', 'Erreur'] }[r.status] || ['', r.status];
   return `<span class="badge ${m[0]}">${m[1]}</span>`;
 }
+// Suppression par glissé vers la droite, avec possibilité d'annuler pendant 5 s
+const pendingDel = new Map();
+function swipeDelete(id) {
+  if (pendingDel.has(id)) return;
+  const timer = setTimeout(async () => { pendingDel.delete(id); await delRec(id); await delChunks(id); renderList(); }, 5000);
+  pendingDel.set(id, timer);
+  renderList();
+  toast('Enregistrement supprimé', 'Annuler', () => { clearTimeout(pendingDel.get(id)); pendingDel.delete(id); renderList(); }, 5000);
+}
+function attachSwipe(row) {
+  const inner = row.querySelector('.inner');
+  let x0 = 0, y0 = 0, dx = 0, mode = null, id = null;
+  row.addEventListener('pointerdown', (e) => { if (R.id && row.dataset.id === R.id) return; x0 = e.clientX; y0 = e.clientY; dx = 0; mode = 'maybe'; id = e.pointerId; inner.style.transition = 'none'; });
+  row.addEventListener('pointermove', (e) => {
+    if (!mode || e.pointerId !== id) return;
+    const ddx = e.clientX - x0, ddy = e.clientY - y0;
+    if (mode === 'maybe') {
+      if (Math.abs(ddy) > 10 && Math.abs(ddy) > Math.abs(ddx)) { mode = null; return; } // défilement vertical
+      if (ddx > 12 && Math.abs(ddx) > Math.abs(ddy)) { mode = 'swipe'; row.setPointerCapture(id); row.classList.add('swiping'); }
+    }
+    if (mode === 'swipe') { dx = Math.max(0, ddx); inner.style.transform = `translateX(${dx}px)`; row.classList.toggle('armed', dx > row.offsetWidth * 0.4); }
+  });
+  const end = () => {
+    if (mode === 'swipe') {
+      row.dataset.swiped = '1'; setTimeout(() => delete row.dataset.swiped, 50);
+      inner.style.transition = 'transform .2s';
+      if (dx > row.offsetWidth * 0.4) { inner.style.transform = 'translateX(110%)'; setTimeout(() => swipeDelete(row.dataset.id), 180); }
+      else { inner.style.transform = ''; row.classList.remove('swiping', 'armed'); }
+    }
+    mode = null;
+  };
+  row.addEventListener('pointerup', end);
+  row.addEventListener('pointercancel', end);
+}
 async function renderList() {
-  const recs = (await allRecs()).sort((a, b) => b.created.localeCompare(a.created));
+  const recs = (await allRecs()).filter((r) => !pendingDel.has(r.id)).sort((a, b) => b.created.localeCompare(a.created));
   $('#recList').innerHTML = recs.length ? recs.map((r) => {
     const open = r.summary ? r.summary.actions.filter((a) => !a.fait).length : 0;
-    return `<a class="item" data-id="${r.id}"><b>${esc(r.title)}</b><span class="muted">${new Date(r.created).toLocaleDateString('fr-FR')} · ${fmt(r.duration || 0)}</span> ${badge(r)}${r.summary ? `<span class="badge">${open} action(s) ouverte(s)</span>` : ''}${hasSpeakers(r) ? `<span class="badge">👥 ${speakerStats(r).length}</span>` : ''}</a>`;
-  }).join('') : '<div class="muted" style="text-align:center;padding:10px">Aucun enregistrement pour l\'instant.</div>';
-  $('#recList').querySelectorAll('.item').forEach((el) => (el.onclick = () => openDetail(el.dataset.id)));
+    return `<div class="item" data-id="${r.id}"><div class="del">🗑 Supprimer</div><div class="inner"><b>${esc(r.title)}</b><span class="muted">${new Date(r.created).toLocaleDateString('fr-FR')} · ${fmt(r.duration || 0)}</span> ${badge(r)}${r.summary ? `<span class="badge">${open} action(s) ouverte(s)</span>` : ''}${hasSpeakers(r) ? `<span class="badge">👥 ${speakerStats(r).length}</span>` : ''}</div></div>`;
+  }).join('') + '<div class="muted" style="text-align:center;font-size:12px;padding-top:8px">Glissez un enregistrement vers la droite pour le supprimer</div>'
+    : '<div class="muted" style="text-align:center;padding:10px">Aucun enregistrement pour l\'instant.</div>';
+  $('#recList').querySelectorAll('.item').forEach((el) => {
+    el.onclick = () => { if (!el.dataset.swiped) openDetail(el.dataset.id); };
+    attachSwipe(el);
+  });
 }
 async function openDetail(id) { curId = id; show('detail'); await renderDetail(); }
 async function renderDetail() {
@@ -582,7 +621,12 @@ function refresh(id) {
   }
   renderList();
 }
-function toast(t) { const d = document.createElement('div'); d.className = 'toast'; d.textContent = t; document.body.appendChild(d); setTimeout(() => d.remove(), 2600); }
+function toast(t, btn, onBtn, ms = 2600) {
+  document.querySelectorAll('.toast').forEach((x) => x.remove());
+  const d = document.createElement('div'); d.className = 'toast'; d.textContent = t;
+  if (btn) { const b = document.createElement('button'); b.textContent = btn; b.className = 'tbtn'; b.onclick = () => { onBtn(); d.remove(); }; d.appendChild(b); }
+  document.body.appendChild(d); setTimeout(() => d.remove(), ms);
+}
 
 // ---------------- Réglages ----------------
 const FIELDS = { policy: 's_policy', anthropicKey: 's_anthropicKey', claudeModel: 's_claudeModel', context: 's_context', stt: 's_stt', mistralKey: 's_mistralKey', openaiKey: 's_openaiKey', localModel: 's_localModel', outlook: 's_outlook', agenda: 's_agenda', mailTo: 's_mailTo' };
@@ -621,6 +665,8 @@ window.addEventListener('beforeunload', (e) => { if (R.id) { e.preventDefault();
     await assemble(r.id, r.mime);
     await patch(r.id, { status: 'recorded', info: 'Enregistrement interrompu — audio récupéré jusqu\'à la coupure' });
   }
+  $('#verHome').textContent = 'G ENVIRONNEMENT · Compte-rendu · version ' + VERSION;
+  $('#verSet').textContent = 'Version ' + VERSION + ' — vos réglages et clés restent sur ce téléphone';
   updateNet(); renderList();
   if (!S.anthropicKey) toast('Commencez par renseigner vos clés API dans ⚙ Réglages');
   resumeQueue();
