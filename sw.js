@@ -1,5 +1,5 @@
 // Service worker : l'application fonctionne sans réseau une fois installée
-const CACHE = 'cr-1.4.1';
+const CACHE = 'cr-1.4.1b';
 const SHELL = ['./', 'index.html', 'app.js', 'whisper-worker.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 self.addEventListener('install', (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL))); self.skipWaiting(); });
 self.addEventListener('activate', (e) => {
@@ -13,6 +13,7 @@ self.addEventListener('fetch', (e) => {
   if (u.pathname.includes('/vendor/')) {
     e.respondWith(caches.match(e.request).then((hit) => hit || fetch(e.request).then((r) => { const c = r.clone(); caches.open(CACHE).then((x) => x.put(e.request, c)); return r; })));
   } else {
-    e.respondWith(fetch(e.request).then((r) => { const c = r.clone(); caches.open(CACHE).then((x) => x.put(e.request, c)); return r; }).catch(() => caches.match(e.request, { ignoreSearch: true })));
+    // no-cache : on revérifie toujours auprès du serveur, pour que les mises à jour arrivent tout de suite
+    e.respondWith(fetch(e.request.url, { cache: 'no-cache' }).then((r) => { const c = r.clone(); caches.open(CACHE).then((x) => x.put(e.request, c)); return r; }).catch(() => caches.match(e.request, { ignoreSearch: true })));
   }
 });
