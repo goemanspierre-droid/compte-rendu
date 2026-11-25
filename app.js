@@ -2,7 +2,7 @@
 // reconnaissance des intervenants, résumé + actions, export Outlook et agenda
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const VERSION = '1.4.1'; // à augmenter à chaque mise à jour (aussi dans sw.js)
+const VERSION = '1.4.2'; // à augmenter à chaque mise à jour (aussi dans sw.js)
 const CHUNK_MS = 15000; // l'audio est sauvegardé toutes les 15 s (rien n'est perdu en cas de coupure)
 
 // ---------------- Réglages ----------------
@@ -534,12 +534,21 @@ function speakNext(kind) {
   if (TTS.on !== kind) return;
   const c = TTS.queue.shift();
   if (!c) return stopSpeak();
+  // niveaux de repli si le moteur vocal échoue : 0 = voix française choisie, 1 = voix par défaut en français, 2 = voix par défaut du téléphone
+  const lvl = +(localStorage.getItem('ttsLevel') || 0);
   const u = new SpeechSynthesisUtterance(c);
-  u.lang = 'fr-FR'; u.rate = +S.ttsRate || 1; u.volume = 1;
-  const v = frVoice(); if (v) { try { u.voice = v; } catch (e) {} }
+  u.rate = lvl ? 1 : (+S.ttsRate || 1); u.volume = 1;
+  if (lvl < 2) u.lang = 'fr-FR';
+  if (lvl === 0) { const v = frVoice(); if (v) { try { u.voice = v; } catch (e) {} } }
   u.onstart = () => { TTS.started = true; clearTimeout(TTS.watch); };
   u.onend = () => speakNext(kind);
-  u.onerror = (e) => { if (TTS.on !== kind) return; if (e.error === 'interrupted' || e.error === 'canceled') return; toast('Lecture impossible : ' + e.error); stopSpeak(); };
+  u.onerror = (e) => {
+    if (TTS.on !== kind) return;
+    if (e.error === 'interrupted' || e.error === 'canceled') return;
+    if (e.error === 'synthesis-failed' && lvl < 2 && !TTS.started) { localStorage.setItem('ttsLevel', lvl + 1); TTS.queue.unshift(c); setTimeout(() => speakNext(kind), 200); return; }
+    toast(e.error === 'synthesis-failed' ? 'Le moteur vocal du téléphone a échoué : voir ⚙ Réglages › Lecture à haute voix' : 'Lecture impossible : ' + e.error, null, null, 6000);
+    stopSpeak();
+  };
   speechSynthesis.resume();
   speechSynthesis.speak(u);
 }
@@ -745,4 +754,4 @@ window.addEventListener('beforeunload', (e) => { if (R.id) { e.preventDefault();
   if (!S.anthropicKey) toast('Commencez par renseigner vos clés API dans ⚙ Réglages');
   resumeQueue();
 })();
-$('#ttsTest').onclick = () => { S.ttsRate = $('#s_ttsRate').value; const n = hasTTS ? speechSynthesis.getVoices().filter((v) => /^fr/i.test(v.lang)).length : 0; $('#ttsInfo').textContent = hasTTS ? (n ? n + ' voix française(s) trouvée(s) sur le téléphone.' : 'Aucune voix française listée : la voix par défaut du téléphone sera utilisée.') : 'Synthèse vocale non disponible dans ce navigateur.'; speak('test', 'Bonjour. Voici la lecture à haute voix du compte-rendu de réunion. Action 1 : envoyer l\'offre au client, pour le vendredi 27 novembre.'); };
+$('#ttsTest').onclick = () => { localStorage.removeItem('ttsLevel'); S.ttsRate = $('#s_ttsRate').value; const n = hasTTS ? speechSynthesis.getVoices().filter((v) => /^fr/i.test(v.lang)).length : 0; $('#ttsInfo').textContent = hasTTS ? (n ? n + ' voix française(s) trouvée(s) sur le téléphone.' : 'Aucune voix française listée : la voix par défaut du téléphone sera utilisée.') : 'Synthèse vocale non disponible dans ce navigateur.'; speak('test', 'Bonjour. Voici la lecture à haute voix du compte-rendu de réunion. Action 1 : envoyer l\'offre au client, pour le vendredi 27 novembre.'); };
