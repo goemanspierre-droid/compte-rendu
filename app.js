@@ -2,7 +2,7 @@
 // reconnaissance des intervenants, résumé + actions, export Outlook et agenda
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const VERSION = '1.5.0'; // à augmenter à chaque mise à jour (aussi dans sw.js)
+const VERSION = '1.5.1'; // à augmenter à chaque mise à jour (aussi dans sw.js)
 const CHUNK_MS = 15000; // l'audio est sauvegardé toutes les 15 s (rien n'est perdu en cas de coupure)
 
 // ---------------- Réglages ----------------
@@ -581,21 +581,8 @@ function speak(kind, text) {
 }
 // Voix en ligne Mistral (Voxtral TTS) : ne dépend pas du moteur vocal du téléphone. Quelques centimes par lecture.
 async function cloudVoice() {
-  const c = localStorage.getItem('ttsCloudVoice');
-  if (c !== null) return c;
-  let id = '';
-  try {
-    const r = await fetch('https://api.mistral.ai/v1/audio/voices?limit=200', { headers: { Authorization: 'Bearer ' + S.mistralKey } });
-    if (r.ok) {
-      const j = await r.json();
-      const list = j.items || j.data || j.voices || (Array.isArray(j) ? j : []);
-      const fr = list.filter((v) => /(^|[^a-z])fr/i.test(JSON.stringify(v.languages || v.language || '')) || /^fr[_-]/i.test(v.slug || ''));
-      const pick = fr.find((v) => /neutral/i.test((v.slug || '') + (v.name || ''))) || fr[0];
-      if (pick) id = pick.slug || pick.id;
-    }
-  } catch (e) {}
-  localStorage.setItem('ttsCloudVoice', id);
-  return id;
+  // voix française prédéfinie de Mistral (Marie, ton neutre)
+  return localStorage.getItem('ttsCloudVoice') || 'fr_marie_neutral';
 }
 async function speakCloud(kind, text) {
   if (!S.mistralKey) { toast('Voix en ligne : clé Mistral manquante (⚙ Réglages)'); return stopSpeak(); }
