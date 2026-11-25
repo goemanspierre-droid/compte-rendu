@@ -3,11 +3,8 @@ import { pipeline, env } from './vendor/transformers.min.js';
 
 env.allowLocalModels = false;
 env.useBrowserCache = true; // les modèles restent en cache après le 1er téléchargement
-const base = new URL('./vendor/', self.location.href).href;
-env.backends.onnx.wasm.wasmPaths = {
-  mjs: base + 'ort-wasm-simd-threaded.asyncify.mjs',
-  wasm: base + 'ort-wasm-simd-threaded.asyncify.wasm',
-};
+// Le moteur WebAssembly (~27 Mo) est chargé depuis le CDN jsDelivr au 1er usage puis gardé en cache
+env.useWasmCache = true;
 
 let asr = null;
 let current = null;
