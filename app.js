@@ -2,7 +2,7 @@
 // reconnaissance des intervenants, résumé + actions, export Outlook et agenda
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const VERSION = '1.4.2'; // à augmenter à chaque mise à jour (aussi dans sw.js)
+const VERSION = '1.5.0'; // à augmenter à chaque mise à jour (aussi dans sw.js)
 const CHUNK_MS = 15000; // l'audio est sauvegardé toutes les 15 s (rien n'est perdu en cas de coupure)
 
 // ---------------- Réglages ----------------
@@ -23,6 +23,7 @@ const DEFAULTS = {
   agenda: 'outlook',
   mailTo: '',
   ttsRate: '1',
+  ttsEngine: 'auto',
 };
 const S = Object.assign({}, DEFAULTS, JSON.parse(localStorage.getItem('settings') || '{}'));
 const saveSettings = () => localStorage.setItem('settings', JSON.stringify(S));
@@ -515,8 +516,9 @@ async function renderList() {
   });
 }
 // ---------------- Lecture à haute voix (synthèse vocale du téléphone, sans connexion) ----------------
-const TTS = { on: null, wake: null, queue: [], started: false, watch: null };
+const TTS = { on: null, wake: null, queue: [], started: false, watch: null, text: '', loading: false, audio: null, cache: new Map() };
 const hasTTS = 'speechSynthesis' in window;
+const canCloudTTS = () => !!S.mistralKey && navigator.onLine;
 function frVoice() {
   const vs = hasTTS ? speechSynthesis.getVoices() : [];
   return vs.find((v) => /^fr[-_]FR/i.test(v.lang) && /google/i.test(v.name)) || vs.find((v) => /^fr[-_]FR/i.test(v.lang)) || vs.find((v) => /^fr/i.test(v.lang)) || null;
@@ -524,17 +526,23 @@ function frVoice() {
 function stopSpeak() {
   TTS.queue = [];
   if (hasTTS && (speechSynthesis.speaking || speechSynthesis.pending)) speechSynthesis.cancel();
-  TTS.on = null;
+  if (TTS.audio) { try { TTS.audio.pause(); } catch (e) {} }
+  TTS.on = null; TTS.loading = false;
   clearTimeout(TTS.watch);
   if (TTS.wake) { TTS.wake.release().catch(() => {}); TTS.wake = null; }
   updSpeakBtns();
+}
+// Le moteur vocal du téléphone ne marche pas : on passe à la voix en ligne (Mistral) si possible
+function phoneFailed(kind, msg) {
+  if (S.ttsEngine !== 'phone' && canCloudTTS()) { localStorage.setItem('ttsPhoneBroken', '1'); const t = TTS.text; stopSpeak(); speakCloud(kind, t); return; }
+  toast(msg, null, null, 7000); stopSpeak();
 }
 // Lecture phrase par phrase (plus fiable sur Chrome Android que de tout empiler d'un coup)
 function speakNext(kind) {
   if (TTS.on !== kind) return;
   const c = TTS.queue.shift();
   if (!c) return stopSpeak();
-  // niveaux de repli si le moteur vocal échoue : 0 = voix française choisie, 1 = voix par défaut en français, 2 = voix par défaut du téléphone
+  // niveaux de repli : 0 = voix française choisie, 1 = voix par défaut en français, 2 = voix par défaut du téléphone
   const lvl = +(localStorage.getItem('ttsLevel') || 0);
   const u = new SpeechSynthesisUtterance(c);
   u.rate = lvl ? 1 : (+S.ttsRate || 1); u.volume = 1;
@@ -546,15 +554,17 @@ function speakNext(kind) {
     if (TTS.on !== kind) return;
     if (e.error === 'interrupted' || e.error === 'canceled') return;
     if (e.error === 'synthesis-failed' && lvl < 2 && !TTS.started) { localStorage.setItem('ttsLevel', lvl + 1); TTS.queue.unshift(c); setTimeout(() => speakNext(kind), 200); return; }
-    toast(e.error === 'synthesis-failed' ? 'Le moteur vocal du téléphone a échoué : voir ⚙ Réglages › Lecture à haute voix' : 'Lecture impossible : ' + e.error, null, null, 6000);
-    stopSpeak();
+    phoneFailed(kind, e.error === 'synthesis-failed' ? 'Le moteur vocal du téléphone a échoué : voir ⚙ Réglages › Lecture à haute voix' : 'Lecture impossible : ' + e.error);
   };
   speechSynthesis.resume();
   speechSynthesis.speak(u);
 }
 function speak(kind, text) {
-  if (!hasTTS) return toast('Lecture vocale non disponible sur cet appareil');
   if (TTS.on === kind) return stopSpeak();
+  if (TTS.on) stopSpeak();
+  TTS.text = text;
+  const useCloud = S.ttsEngine === 'cloud' || !hasTTS || (S.ttsEngine !== 'phone' && localStorage.getItem('ttsPhoneBroken') === '1' && canCloudTTS());
+  if (useCloud) return speakCloud(kind, text);
   const wasBusy = speechSynthesis.speaking || speechSynthesis.pending;
   if (wasBusy) speechSynthesis.cancel();
   const parts = text.replace(/\s+/g, ' ').match(/[^.!?;]+[.!?;]*/g) || [text];
@@ -563,16 +573,66 @@ function speak(kind, text) {
   if (cur.trim()) chunks.push(cur.trim());
   TTS.queue = chunks; TTS.on = kind; TTS.started = false; updSpeakBtns();
   try { navigator.wakeLock.request('screen').then((w) => { if (TTS.on) TTS.wake = w; else w.release(); }).catch(() => {}); } catch (e) {}
-  // si rien ne démarre en 4 s : on prévient (volume média, moteur vocal)
+  // si rien ne démarre en 4 s : voix en ligne, ou conseil (volume média, moteur vocal)
   clearTimeout(TTS.watch);
-  TTS.watch = setTimeout(() => { if (TTS.on === kind && !TTS.started) { toast('Aucun son ? Montez le volume MÉDIA pendant la lecture, et vérifiez le moteur de synthèse vocale (⚙ Réglages)', null, null, 7000); stopSpeak(); } }, 4000);
+  TTS.watch = setTimeout(() => { if (TTS.on === kind && !TTS.started) phoneFailed(kind, 'Aucun son ? Montez le volume MÉDIA pendant la lecture, et vérifiez le moteur de synthèse vocale (⚙ Réglages)'); }, 4000);
   if (wasBusy) setTimeout(() => speakNext(kind), 250); // Chrome Android ignore un speak() juste après cancel()
   else speakNext(kind);
+}
+// Voix en ligne Mistral (Voxtral TTS) : ne dépend pas du moteur vocal du téléphone. Quelques centimes par lecture.
+async function cloudVoice() {
+  const c = localStorage.getItem('ttsCloudVoice');
+  if (c !== null) return c;
+  let id = '';
+  try {
+    const r = await fetch('https://api.mistral.ai/v1/audio/voices?limit=200', { headers: { Authorization: 'Bearer ' + S.mistralKey } });
+    if (r.ok) {
+      const j = await r.json();
+      const list = j.items || j.data || j.voices || (Array.isArray(j) ? j : []);
+      const fr = list.filter((v) => /(^|[^a-z])fr/i.test(JSON.stringify(v.languages || v.language || '')) || /^fr[_-]/i.test(v.slug || ''));
+      const pick = fr.find((v) => /neutral/i.test((v.slug || '') + (v.name || ''))) || fr[0];
+      if (pick) id = pick.slug || pick.id;
+    }
+  } catch (e) {}
+  localStorage.setItem('ttsCloudVoice', id);
+  return id;
+}
+async function speakCloud(kind, text) {
+  if (!S.mistralKey) { toast('Voix en ligne : clé Mistral manquante (⚙ Réglages)'); return stopSpeak(); }
+  if (!navigator.onLine) { toast('Voix en ligne : pas de réseau'); return stopSpeak(); }
+  clearTimeout(TTS.watch);
+  TTS.on = kind; TTS.loading = true; TTS.text = text; updSpeakBtns();
+  try { navigator.wakeLock.request('screen').then((w) => { if (TTS.on) TTS.wake = w; else w.release(); }).catch(() => {}); } catch (e) {}
+  try {
+    let url = TTS.cache.get(text);
+    if (!url) {
+      const voice = await cloudVoice();
+      const call = (model) => fetch('https://api.mistral.ai/v1/audio/speech', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + S.mistralKey },
+        body: JSON.stringify(Object.assign({ model, input: text, response_format: 'mp3' }, voice ? { voice_id: voice } : {})),
+      });
+      let r = await call('voxtral-mini-tts-3-0');
+      if (r.status === 400 || r.status === 404 || r.status === 422) { const r2 = await call('voxtral-mini-tts-2603'); if (r2.ok) r = r2; }
+      if (!r.ok) throw new Error(r.status + ' ' + (await r.text()).slice(0, 160));
+      const j = await r.json();
+      const bin = Uint8Array.from(atob(j.audio_data), (ch) => ch.charCodeAt(0));
+      url = URL.createObjectURL(new Blob([bin], { type: 'audio/mpeg' }));
+      TTS.cache.set(text, url); // relire le même texte ne coûte rien
+    }
+    if (TTS.on !== kind) return;
+    TTS.loading = false; updSpeakBtns();
+    const a = TTS.audio || (TTS.audio = new Audio());
+    a.src = url; a.playbackRate = +S.ttsRate || 1;
+    a.onended = () => { if (TTS.on === kind) stopSpeak(); };
+    await a.play();
+  } catch (e) {
+    if (TTS.on === kind) { toast('Voix en ligne : ' + e.message, null, null, 7000); stopSpeak(); }
+  }
 }
 function updSpeakBtns() {
   document.querySelectorAll('[data-speak]').forEach((b) => {
     const k = b.dataset.speak, on = TTS.on === k;
-    b.textContent = on ? '⏹ Arrêter la lecture' : k === 'sum' ? '🔊 Écouter le résumé' : '🔊 Écouter les actions';
+    b.textContent = on ? (TTS.loading ? '⏳ Préparation de la voix…' : '⏹ Arrêter la lecture') : k === 'sum' ? '🔊 Écouter le résumé' : '🔊 Écouter les actions';
     b.classList.toggle('pri', on);
   });
 }
@@ -630,11 +690,11 @@ async function renderDetail() {
   ${r.transcript && !hasSpeakers(r) && S.diarize && cloudKey() && n !== 'offline' && r.status !== 'run' ? `<div class="card"><div class="muted">Transcription faite sans distinguer les intervenants.</div>
     <button id="dDiar" style="margin-top:8px">👥 Identifier les intervenants (envoi audio ${sizeMB} Mo${n === 'mobile' ? ', en 4G' : ''})</button></div>` : ''}
   ${s ? `<div class="card">
-    <h2>Résumé</h2>${hasTTS ? '<button data-speak="sum" class="speak">🔊 Écouter le résumé</button>' : ''}<div>${esc(nm(s.resume))}</div>
+    <h2>Résumé</h2>${hasTTS || S.mistralKey ? '<button data-speak="sum" class="speak">🔊 Écouter le résumé</button>' : ''}<div>${esc(nm(s.resume))}</div>
     ${s.points_cles && s.points_cles.length ? `<h3>Points clés</h3><ul>${s.points_cles.map((x) => `<li>${esc(nm(x))}</li>`).join('')}</ul>` : ''}
     ${s.decisions && s.decisions.length ? `<h3>Décisions</h3><ul>${s.decisions.map((x) => `<li>${esc(nm(x))}</li>`).join('')}</ul>` : ''}
   </div>
-  <div class="card"><h2>Actions à réaliser</h2>${hasTTS && (s.actions || []).length ? '<button data-speak="act" class="speak">🔊 Écouter les actions</button>' : ''}
+  <div class="card"><h2>Actions à réaliser</h2>${(hasTTS || S.mistralKey) && (s.actions || []).length ? '<button data-speak="act" class="speak">🔊 Écouter les actions</button>' : ''}
     ${(s.actions || []).length ? s.actions.map((a, i) => `<div class="act ${a.fait ? 'done' : ''}"><input type="checkbox" data-i="${i}" ${a.fait ? 'checked' : ''}>
       <div style="flex:1"><div class="t">${esc(nm(a.action))}</div>
       <div class="m">${a.responsable ? '👤 ' + esc(nm(a.responsable)) + ' · ' : ''}${a.echeance ? '« ' + esc(a.echeance) + ' » · ' : ''}<span class="prio-${esc(a.priorite)}">${esc(a.priorite || '')}</span></div>
@@ -712,7 +772,7 @@ function toast(t, btn, onBtn, ms = 2600) {
 }
 
 // ---------------- Réglages ----------------
-const FIELDS = { policy: 's_policy', anthropicKey: 's_anthropicKey', claudeModel: 's_claudeModel', context: 's_context', stt: 's_stt', mistralKey: 's_mistralKey', openaiKey: 's_openaiKey', localModel: 's_localModel', outlook: 's_outlook', agenda: 's_agenda', mailTo: 's_mailTo', ttsRate: 's_ttsRate' };
+const FIELDS = { policy: 's_policy', anthropicKey: 's_anthropicKey', claudeModel: 's_claudeModel', context: 's_context', stt: 's_stt', mistralKey: 's_mistralKey', openaiKey: 's_openaiKey', localModel: 's_localModel', outlook: 's_outlook', agenda: 's_agenda', mailTo: 's_mailTo', ttsRate: 's_ttsRate', ttsEngine: 's_ttsEngine' };
 const CHECKS = { summaryMobile: 's_summaryMobile', unknownWifi: 's_unknownWifi', diarize: 's_diarize', autoDiarize: 's_autoDiarize' };
 function fillSettings() {
   for (const [k, id] of Object.entries(FIELDS)) $('#' + id).value = S[k];
@@ -754,4 +814,4 @@ window.addEventListener('beforeunload', (e) => { if (R.id) { e.preventDefault();
   if (!S.anthropicKey) toast('Commencez par renseigner vos clés API dans ⚙ Réglages');
   resumeQueue();
 })();
-$('#ttsTest').onclick = () => { localStorage.removeItem('ttsLevel'); S.ttsRate = $('#s_ttsRate').value; const n = hasTTS ? speechSynthesis.getVoices().filter((v) => /^fr/i.test(v.lang)).length : 0; $('#ttsInfo').textContent = hasTTS ? (n ? n + ' voix française(s) trouvée(s) sur le téléphone.' : 'Aucune voix française listée : la voix par défaut du téléphone sera utilisée.') : 'Synthèse vocale non disponible dans ce navigateur.'; speak('test', 'Bonjour. Voici la lecture à haute voix du compte-rendu de réunion. Action 1 : envoyer l\'offre au client, pour le vendredi 27 novembre.'); };
+$('#ttsTest').onclick = () => { localStorage.removeItem('ttsLevel'); localStorage.removeItem('ttsPhoneBroken'); S.ttsRate = $('#s_ttsRate').value; S.ttsEngine = $('#s_ttsEngine').value; const n = hasTTS ? speechSynthesis.getVoices().filter((v) => /^fr/i.test(v.lang)).length : 0; $('#ttsInfo').textContent = hasTTS ? (n ? n + ' voix française(s) trouvée(s) sur le téléphone.' : 'Aucune voix française listée : la voix par défaut du téléphone sera utilisée.') : 'Synthèse vocale non disponible dans ce navigateur.'; speak('test', 'Bonjour. Voici la lecture à haute voix du compte-rendu de réunion. Action 1 : envoyer l\'offre au client, pour le vendredi 27 novembre.'); };
