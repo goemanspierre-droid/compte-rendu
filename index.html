@@ -12,7 +12,7 @@
 *{box-sizing:border-box}
 html,body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
 header{position:sticky;top:0;z-index:5;background:var(--g);color:#fff;padding:12px 14px calc(12px);display:flex;align-items:center;gap:10px}
-header h1{font-size:18px;margin:0;flex:1;font-weight:600}
+header h1{font-size:17px;margin:0;flex:1;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .chip{font-size:12px;padding:4px 9px;border-radius:99px;background:rgba(255,255,255,.16);white-space:nowrap}
 .iconbtn{background:none;border:0;color:inherit;font-size:22px;padding:4px 6px;cursor:pointer}
 main{max-width:720px;margin:0 auto;padding:14px 14px 120px}
@@ -58,12 +58,20 @@ audio{width:100%;margin-top:6px}
 .spk .spkName{flex:1}
 .dot{width:12px;height:12px;border-radius:50%;flex:none}
 .utt{margin-bottom:8px}
+#logo{height:36px;max-width:120px;object-fit:contain;background:#fff;border-radius:6px;padding:2px 5px}
+.list .item{position:relative;overflow:hidden;padding:0;touch-action:pan-y;user-select:none}
+.list .item .inner{position:relative;background:var(--card);padding:12px 2px;z-index:1}
+.list .item .del{position:absolute;inset:0;background:#dc2626;color:#fff;display:flex;align-items:center;padding-left:16px;font-weight:600;opacity:0}
+.list .item.swiping .del{opacity:.55}.list .item.armed .del{opacity:1}
+.toast{display:flex;align-items:center;gap:14px}.tbtn{background:none;border:0;color:#86efac;font-weight:700;padding:2px 4px}
+.ver{text-align:center;font-size:12px;color:var(--mu);margin-top:14px}
 .netbox{font-size:14px;border-left:4px solid var(--g2);padding:8px 10px;background:#f0f7f2;border-radius:8px}
 </style>
 </head>
 <body>
 <header>
   <button class="iconbtn hidden" id="backBtn" aria-label="Retour">←</button>
+  <img id="logo" alt="G ENVIRONNEMENT" src="data:image/png;base64,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">
   <h1 id="title">Compte-rendu</h1>
   <span class="chip" id="netChip">…</span>
   <button class="iconbtn" id="setBtn" aria-label="Réglages">⚙</button>
@@ -85,6 +93,7 @@ audio{width:100%;margin-top:6px}
     </div>
     <div class="netbox" id="netExplain"></div>
     <div class="card list" id="recList" style="margin-top:12px"></div>
+    <div class="ver" id="verHome"></div>
   </section>
 
   <!-- DETAIL -->
@@ -164,6 +173,7 @@ audio{width:100%;margin-top:6px}
     </div>
 
     <button class="pri big" id="saveSet">Enregistrer les réglages</button>
+    <div class="ver" id="verSet"></div>
   </section>
 </main>
 <script type="module" src="app.js"></script>
