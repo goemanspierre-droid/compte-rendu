@@ -2,7 +2,7 @@
 // reconnaissance des intervenants, résumé + actions, export Outlook et agenda
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const VERSION = '1.6.0'; // à augmenter à chaque mise à jour (aussi dans sw.js)
+const VERSION = '1.7.0'; // à augmenter à chaque mise à jour (aussi dans sw.js)
 const CHUNK_MS = 15000; // l'audio est sauvegardé toutes les 15 s (rien n'est perdu en cas de coupure)
 
 // ---------------- Réglages ----------------
@@ -136,7 +136,7 @@ async function startRecording() {
   try { R.wake = await navigator.wakeLock.request('screen'); } catch (e) {}
   meter();
   $('#recBtn').classList.add('on'); $('#recBtn').textContent = '■ Arrêter';
-  $('#recPanel').classList.remove('hidden'); $('#homeTools').classList.add('hidden');
+  $('#recPanel').classList.remove('hidden'); $('#homeTools').classList.add('hidden'); $('#shareHint').classList.add('hidden');
   renderList();
 }
 async function assemble(id, mime) {
@@ -161,7 +161,7 @@ async function stopRecording() {
   await assemble(id, R.mime);
   await patch(id, { status: 'recorded', duration: Date.now() - R.start });
   $('#recBtn').classList.remove('on'); $('#recBtn').textContent = '● Enregistrer';
-  $('#recPanel').classList.add('hidden'); $('#homeTools').classList.remove('hidden'); $('#timer').textContent = '00:00';
+  $('#recPanel').classList.add('hidden'); $('#homeTools').classList.remove('hidden'); $('#shareHint').classList.remove('hidden'); $('#timer').textContent = '00:00';
   openDetail(id);
   processRec(id);
 }
@@ -178,15 +178,38 @@ function meter() {
 document.addEventListener('visibilitychange', async () => {
   if (document.visibilityState === 'visible' && R.id && !R.wake) { try { R.wake = await navigator.wakeLock.request('screen'); } catch (e) {} }
 });
+// Import d'un fichier audio (dictaphone, enregistrement d'appel…) ; détecte un appel d'après le nom du fichier
+const looksLikeCall = (name) => /(appel|call|t[ée]l[ée]phone|enregistrement d.appel|\+?\d[\d .]{8,})/i.test(name || '');
+async function createFromFile(f, kindHint) {
+  const id = 'r' + Date.now() + Math.floor(Math.random() * 1000);
+  const name = f.name || 'audio';
+  const kind = kindHint === 'auto' || !kindHint ? (looksLikeCall(name) ? 'appel' : 'reunion') : kindHint;
+  const when = f.lastModified && Math.abs(Date.now() - f.lastModified) < 3e10 ? new Date(f.lastModified) : new Date();
+  let duration = 0;
+  try { duration = await new Promise((res) => { const a = new Audio(URL.createObjectURL(f)); a.onloadedmetadata = () => res((a.duration || 0) * 1000); a.onerror = () => res(0); setTimeout(() => res(0), 4000); }); } catch (_) {}
+  const base = name.replace(/\.[^.]+$/, '').replace(/[_]+/g, ' ').trim();
+  await putRec({ id, created: when.toISOString(), title: (kind === 'appel' ? 'Appel – ' : '') + base, fileName: name, kind, segments: [f], duration: isFinite(duration) ? duration : 0, status: 'recorded', mime: f.type });
+  return id;
+}
 $('#importFile').addEventListener('change', async (e) => {
   const f = e.target.files[0]; if (!f) return;
-  const id = 'r' + Date.now(), d = new Date();
-  let duration = 0;
-  try { duration = await new Promise((res) => { const a = new Audio(URL.createObjectURL(f)); a.onloadedmetadata = () => res((a.duration || 0) * 1000); a.onerror = () => res(0); }); } catch (_) {}
-  await putRec({ id, created: d.toISOString(), title: f.name.replace(/\.[^.]+$/, ''), segments: [f], duration: isFinite(duration) ? duration : 0, status: 'recorded', mime: f.type });
+  const id = await createFromFile(f, 'auto');
   e.target.value = '';
   openDetail(id); processRec(id);
 });
+// Fichiers reçus via « Partager › Compte-rendu » (déposés par le service worker)
+async function importShared() {
+  const sdb = await new Promise((res, rej) => { const r = indexedDB.open('cr-share', 1); r.onupgradeneeded = () => r.result.createObjectStore('files', { autoIncrement: true }); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+  const items = await new Promise((res) => { const q = sdb.transaction('files').objectStore('files').getAll(); q.onsuccess = () => res(q.result || []); q.onerror = () => res([]); });
+  await new Promise((res) => { const t = sdb.transaction('files', 'readwrite'); t.objectStore('files').clear(); t.oncomplete = res; t.onerror = res; });
+  let last = null;
+  for (const it of items) {
+    const f = new File([it.blob], it.name || 'appel.m4a', { type: it.type || it.blob.type, lastModified: it.lastModified || it.at });
+    last = await createFromFile(f, 'auto');
+    processRec(last);
+  }
+  if (last) { openDetail(last); toast(items.length > 1 ? items.length + ' enregistrements reçus' : 'Enregistrement reçu : traitement en cours'); }
+}
 
 // ---------------- Transcription cloud (avec intervenants) ----------------
 async function cloudTranscribe(blob) {
@@ -281,7 +304,9 @@ async function localTranscribe(blob, onStep) {
 async function summarize(rec, extra) {
   const d = new Date(rec.created);
   const iso = d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-  const system = `Tu rédiges des comptes-rendus de réunion pour un professionnel. Contexte métier : ${S.context}
+  const isCall = rec.kind === 'appel';
+  const system = `Tu rédiges des comptes-rendus ${isCall ? "d'appels téléphoniques" : 'de réunion'} pour un professionnel. Contexte métier : ${S.context}
+${isCall ? `Il s'agit d'un APPEL TÉLÉPHONIQUE (en général deux interlocuteurs). Le titre doit être de la forme « Appel avec [nom ou société] – [objet] ». Le résumé précise : qui a appelé qui (si on peut le déduire), l'objet de l'appel, les informations échangées (chiffres, dates, adresses, références de dossier) et les engagements pris par chacun. Les actions doivent distinguer ce que je dois faire et ce que l'interlocuteur doit faire (responsable). Dans "prochaine_reunion", indique un rappel ou rendez-vous convenu s'il y en a un.` : ''}
 La transcription provient d'une reconnaissance vocale automatique : elle peut contenir des erreurs et des mots mal reconnus. Corrige mentalement les erreurs évidentes, mais n'invente rien.
 ${hasSpeakers(rec) ? `Les tours de parole sont étiquetés [Intervenant 1], [Intervenant 2]… Déduis si possible le nom réel de chacun à partir du contenu (ex. « merci Pierre », présentation, rôle). Pour le champ "responsable" d'une action, utilise le nom réel s'il est connu, sinon l'étiquette exacte « Intervenant N ».` : `La transcription ne distingue pas les intervenants.`}
 Si une information (responsable, échéance) n'est pas dite, mets null. Convertis les échéances relatives (« vendredi », « fin du mois », « sous 15 jours ») en date AAAA-MM-JJ par rapport à la date de la réunion.
@@ -294,7 +319,7 @@ Réponds UNIQUEMENT avec un objet JSON valide, sans texte autour, au format :
  "actions": [{"action": "verbe à l'infinitif + objet précis", "responsable": "nom, Intervenant N, ou null", "echeance": "échéance telle que dite, ou null", "echeance_date": "AAAA-MM-JJ ou null", "priorite": "haute|normale|basse"}],
  "questions_ouvertes": ["…"],
  "prochaine_reunion": {"date": "AAAA-MM-JJ", "heure": "HH:MM ou null", "objet": "…"} ou null}`;
-  const user = `Date de la réunion : ${d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })} (${iso})\nTitre provisoire : ${rec.title}\n${extra ? 'Consigne complémentaire : ' + extra + '\n' : ''}\nTranscription :\n"""\n${rec.transcript}\n"""`;
+  const user = `${isCall ? "Date de l'appel" : 'Date de la réunion'} : ${d.toLocaleDateString('fr-FR', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' })} (${iso})\nTitre provisoire : ${rec.title}\n${rec.fileName ? "Nom du fichier d'origine (contient souvent le nom ou le numéro de l'interlocuteur) : " + rec.fileName + '\n' : ''}${extra ? 'Consigne complémentaire : ' + extra + '\n' : ''}\nTranscription :\n"""\n${rec.transcript}\n"""`;
   const r = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'x-api-key': S.anthropicKey, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
@@ -392,7 +417,7 @@ function exportText(r, md) {
   const parts = speakerStats(r).map((x) => nm(x.label));
   const acts = (s.actions || []).map((a) => `${md ? '- [' + (a.fait ? 'x' : ' ') + ']' : a.fait ? '☑' : '☐'} ${nm(a.action)}${a.responsable ? ' — ' + nm(a.responsable) : ''}${a.echeance_date ? ' — pour le ' + fmtD(a.echeance_date) : a.echeance ? ' — ' + a.echeance : ''}${a.priorite === 'haute' ? ' (PRIORITAIRE)' : ''}`).join('\n');
   const pr = s.prochaine_reunion;
-  return `${md ? '# ' : 'COMPTE-RENDU — '}${r.title}\n${new Date(r.created).toLocaleString('fr-FR')} · durée ${fmt(r.duration || 0)}\n${parts.length ? 'Participants : ' + parts.join(', ') + '\n' : ''}${H('Résumé')}${nm(s.resume || '')}\n${L('Points clés', s.points_cles)}${L('Décisions', s.decisions)}${acts ? H('Actions à réaliser') + acts + '\n' : ''}${L('Questions ouvertes', s.questions_ouvertes)}${pr ? H('Prochaine réunion') + fmtD(pr.date) + (pr.heure ? ' à ' + pr.heure : '') + ' — ' + nm(pr.objet || '') + '\n' : ''}`;
+  return `${md ? '# ' : r.kind === 'appel' ? "COMPTE-RENDU D'APPEL — " : 'COMPTE-RENDU — '}${r.title}\n${new Date(r.created).toLocaleString('fr-FR')} · durée ${fmt(r.duration || 0)}\n${parts.length ? 'Participants : ' + parts.join(', ') + '\n' : ''}${H('Résumé')}${nm(s.resume || '')}\n${L('Points clés', s.points_cles)}${L('Décisions', s.decisions)}${acts ? H('Actions à réaliser') + acts + '\n' : ''}${L('Questions ouvertes', s.questions_ouvertes)}${pr ? H('Prochaine réunion') + fmtD(pr.date) + (pr.heure ? ' à ' + pr.heure : '') + ' — ' + nm(pr.objet || '') + '\n' : ''}`;
 }
 async function sendOutlook(r) {
   const body = exportText(r, false);
@@ -507,7 +532,7 @@ async function renderList() {
   const recs = (await allRecs()).filter((r) => !pendingDel.has(r.id)).sort((a, b) => b.created.localeCompare(a.created));
   $('#recList').innerHTML = recs.length ? recs.map((r) => {
     const open = r.summary ? r.summary.actions.filter((a) => !a.fait).length : 0;
-    return `<div class="item" data-id="${r.id}"><div class="del">🗑 Supprimer</div><div class="inner"><b>${esc(r.title)}</b><span class="muted">${new Date(r.created).toLocaleDateString('fr-FR')} · ${fmt(r.duration || 0)}</span> ${badge(r)}${r.summary ? `<span class="badge">${open} action(s) ouverte(s)</span>` : ''}${hasSpeakers(r) ? `<span class="badge">👥 ${speakerStats(r).length}</span>` : ''}</div></div>`;
+    return `<div class="item" data-id="${r.id}"><div class="del">🗑 Supprimer</div><div class="inner"><b>${esc(r.title)}</b><span class="muted">${new Date(r.created).toLocaleDateString('fr-FR')} · ${fmt(r.duration || 0)}</span> ${badge(r)}${r.summary ? `<span class="badge">${open} action(s) ouverte(s)</span>` : ''}${hasSpeakers(r) ? `<span class="badge">👥 ${speakerStats(r).length}</span>` : ''}${r.kind === 'appel' ? '<span class="badge">📞 Appel</span>' : ''}</div></div>`;
   }).join('') + '<div class="muted" style="text-align:center;font-size:12px;padding-top:8px">Glissez un enregistrement vers la droite pour le supprimer</div>'
     : '<div class="muted" style="text-align:center;padding:10px">Aucun enregistrement pour l\'instant.</div>';
   $('#recList').querySelectorAll('.item').forEach((el) => {
@@ -756,7 +781,7 @@ const dLong = (iso) => new Date(iso + 'T12:00:00').toLocaleDateString('fr-FR', {
 function summarySpeech(r) {
   const s = r.summary, nm = namer(r);
   const end = (x) => { x = nm(x).trim(); return /[.!?]$/.test(x) ? x : x + '.'; };
-  let t = `Compte-rendu : ${r.title}. ${nm(s.resume)} `;
+  let t = `${r.kind === 'appel' ? "Compte-rendu d'appel" : 'Compte-rendu'} : ${r.title}. ${nm(s.resume)} `;
   if (s.points_cles && s.points_cles.length) t += 'Points clés : ' + s.points_cles.map(end).join(' ') + ' ';
   if (s.decisions && s.decisions.length) t += 'Décisions : ' + s.decisions.map(end).join(' ') + ' ';
   const p = s.prochaine_reunion;
@@ -783,6 +808,7 @@ async function renderDetail() {
   $('#vDetail').innerHTML = `
   <div class="card">
     <input type="text" id="dTitle" value="${esc(r.title)}" style="font-weight:600;font-size:17px">
+    <div class="row" style="margin-top:8px;flex-wrap:nowrap"><span class="muted">Type :</span><select id="dKind" style="width:auto;padding:5px 8px;font-size:14px"><option value="reunion" ${r.kind !== 'appel' ? 'selected' : ''}>Réunion</option><option value="appel" ${r.kind === 'appel' ? 'selected' : ''}>📞 Appel téléphonique</option></select></div>
     <div class="muted" style="margin-top:6px">${new Date(r.created).toLocaleString('fr-FR')} · ${fmt(r.duration || 0)} ${r.transcriptMode ? '· transcrit ' + (r.transcriptMode === 'cloud' ? 'dans le cloud' : 'sur le téléphone') : ''}</div>
     <div style="margin-top:8px">${badge(r)} <span class="muted">${esc(r.info || '')}</span></div>
     ${r.status === 'run' && r.pct != null ? `<div class="prog"><i style="width:${Math.round(r.pct * 100)}%"></i></div>` : ''}
@@ -835,6 +861,10 @@ async function renderDetail() {
 
   const on = (sel, fn) => { const el = $(sel); el && (el.onclick = fn); };
   $('#dTitle').onchange = (e) => patch(curId, { title: e.target.value, titleEdited: true });
+  $('#dKind').onchange = async (e) => {
+    const rr = await patch(curId, { kind: e.target.value });
+    if (rr && rr.summary && S.anthropicKey) toast('Type modifié', 'Refaire le résumé', () => processRec(curId, { resummarize: true, forceSummary: true }), 7000);
+  };
   on('#dRetry', () => processRec(curId));
   on('#dForceCloud', () => processRec(curId, { forceCloud: true }));
   on('#dForceLocal', () => processRec(curId, { forceLocal: true }));
@@ -927,6 +957,7 @@ window.addEventListener('beforeunload', (e) => { if (R.id) { e.preventDefault();
   }
   $('#verHome').textContent = 'G ENVIRONNEMENT · Compte-rendu · version ' + VERSION;
   $('#verSet').textContent = 'Version ' + VERSION + ' — vos réglages et clés restent sur ce téléphone';
+  if (/[?&]shared=/.test(location.search)) { history.replaceState(null, '', location.pathname); try { await importShared(); } catch (e) { toast('Partage : ' + e.message); } }
   if (!localStorage.getItem('mig160')) { localStorage.setItem('mig160', '1'); if (S.ttsEngine === 'cloud' || S.ttsEngine === 'phone') { S.ttsEngine = 'app'; saveSettings(); } }
   updateNet(); renderList();
   if (!S.anthropicKey) toast('Commencez par renseigner vos clés API dans ⚙ Réglages');
